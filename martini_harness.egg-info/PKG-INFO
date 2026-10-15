@@ -1,0 +1,258 @@
+Metadata-Version: 2.4
+Name: martini_harness
+Version: 0.1.0
+Summary: A Python framework for dispatching Martini MD simulation campaigns from YAML configs
+Author-email: Felix Gruenewald <felix.gruenewald@example.com>
+License: MIT
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: ruamel.yaml>=0.17.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: GromacsWrapper>=0.7.0
+Requires-Dist: polyply>=1.0
+Requires-Dist: vermouth>=0.15.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+Requires-Dist: mypy>=1.0; extra == "dev"
+
+# Martini Harness
+
+A modular Python framework for running MD simulation campaigns using Gromacs Wrapper and Polyply.
+
+## Overview
+
+`martini_harness` converts the original `run_simulation.py` monolithic script into a flexible package that can:
+
+- Load simulation configurations from YAML files
+- Run multiple target molecules with different solvents in a single campaign
+- Generate coordinates using Polyply
+- Execute GROMACS simulations via the `gromacs` module
+- Support custom MDP parameters and workflow steps
+
+## Installation
+
+### From Source (Development)
+
+```bash
+# Navigate to repository root
+cd /home/fgruenewald/ProgramDev/MartiniHarness
+
+# Install in editable mode with dependencies
+pip install -e .
+```
+
+This will install the `martini_harness` package and all required dependencies:
+- `polyply`: Coordinate generation for Martini force field
+- `gromacs`: GROMACS Wrapper for running simulations
+- `pydantic-settings`: Configuration management
+- `ruamel.yaml`: YAML parsing and generation
+
+## Usage
+
+### Command Line Interface
+
+The package provides a CLI with three main commands:
+
+```bash
+# Run a simulation campaign from YAML config
+martini_harness run <config_file> [--output-dir <dir>] [--dry-run]
+
+# List target molecules available in the system (from itp files)
+martini_harness list-molecules <molecule_list_file>
+
+# Initialize a sample YAML configuration file
+martini_harness init-config <name> --solvent <OCO|W|CLF> --target <molecule>
+```
+
+### Examples
+
+#### Running a Campaign
+
+1. **Create or edit a YAML configuration:**
+
+```yaml
+title: "My Simulation Campaign"
+output_base: "./campaigns/my_results"
+gromacs_path: "/path/to/gmx_forcefield"  # optional
+mdp_directory: "/path/to/mdp_files"       # optional
+
+simulations:
+  - name: "target_in_water"
+    target_molecule: "row42"
+    solvent: "W"
+    n_target: 1
+    n_solvent: 8000
+    density: 997.0
+    
+  - name: "target_in_chloroform"
+    target_molecule: "row42"
+    solvent: "CLF"
+    n_target: 1
+    n_solvent: 6000
+    density: 815.0
+```
+
+2. **Run the campaign:**
+
+```bash
+martini_harness run sample_campaign.yaml --output-dir ./campaigns/test
+```
+
+#### Dry Run (Check Configuration)
+
+To verify your configuration without running simulations:
+
+```bash
+martini_harness run sample_campaign.yaml --dry-run
+```
+
+This will print the parsed configuration and show what would be executed.
+
+### Programmatic Usage
+
+You can also use `martini_harness` directly in Python scripts:
+
+```python
+from pathlib import Path
+from martini_harness.config import load_yaml_config, dump_config_to_yaml
+from martini_harness.simulation import SimulationCampaign
+
+# Load configuration
+config = load_yaml_config("sample_campaign.yaml")
+
+# Create a campaign instance
+campaign = SimulationCampaign(config)
+
+# Run the full campaign (if not dry run)
+if config.dry_run:
+    print("Dry-run mode - would execute:")
+    for sim in campaign.simulations:
+        print(f"  - {sim.config.name}")
+else:
+    campaign.run()
+```
+
+## Configuration Details
+
+### YAML Structure
+
+The configuration file supports the following structure:
+
+```yaml
+# Campaign-level settings
+title: "Campaign Name"
+output_base: "./campaigns/output"
+
+gromacs_path: "/absolute/path/to/forcefield"  # optional, defaults to package data
+mdp_directory: "/absolute/path/to/mdp_files"  # optional, defaults to package data
+
+simulations:
+  - name: "unique_identifier"           # required
+    target_molecule: "molecule_name"    # required, matches itp file stem
+    solvent: "OCO|W|CLF"               # required, must be valid Polyply solvent
+    
+    n_target: 1                         # optional, default=1
+    n_solvent: 8000                     # optional, default=8000
+    density: 900.0                      # optional, default=900 (kg/m³)
+    
+    mdp_files:                          # optional, list of step configs
+      - name: "minimization"
+        mdp_file: "awh.mdp"
+        maxwarn: 4
+    
+    extra_args:                         # optional, passed to grompp/mdrun
+      steps: "em"
+```
+
+### Default Simulation Steps
+
+If no custom MDP files are specified, the framework uses default GROMACS workflow:
+1. **Minimization** - `awh.mdp` (steepest descent energy minimization)
+2. **NVT Equilibration** - `nvt.mdp` (constant temperature)
+3. **NPT Equilibration** - `npt.mdp` (constant pressure and temperature)
+4. **Production MD** - `md.mdp` (production simulation)
+
+## Package Structure
+
+```
+martini_harness/
+├── __init__.py          # Package initialization, logging setup, path helpers
+├── config.py            # Pydantic configuration models, YAML I/O
+├── simulation.py        # Core simulation classes and workflow logic
+├── cli.py               # Command-line interface with argparse
+data/
+├── gmx_files/           # GROMACS force field files (martini_v3*)
+├── mdp_files/           # MDP parameter files (*.mdp)
+└── row42.itp            # Example molecule topology
+```
+
+## Key Components
+
+### 1. Configuration Models (`config.py`)
+
+- `CampaignConfig`: Top-level campaign settings with path resolution
+- `SimulationConfig`: Individual simulation parameters
+- `SimulationStep`: Custom GROMACS workflow steps (optional)
+
+### 2. Simulation Engine (`simulation.py`)
+
+- `SimulationCampaign`: Manages the full campaign execution
+- `CoordinateGenerator`: Uses Polyply to generate system coordinates
+- `SimulationRunner`: Executes GROMACS commands via the `gromacs` module
+- `write_topology`: Helper for combining force field and molecule topologies
+
+### 3. CLI (`cli.py`)
+
+```
+martini_harness [COMMAND] [OPTIONS] COMMAND [ARGS]...
+```
+
+## Requirements
+
+- **Python**: 3.9+
+- **GROMACS binaries**: Must be in PATH (gmx, grompp, mdrun)
+- **Polyply**: For coordinate generation (`pip install polyply`)
+- **GromacsWrapper** (module `gromacs`): For running simulations (`pip install gromacs`)
+
+## Troubleshooting
+
+### Common Issues
+
+1. **"No module named 'martini_harness'"**
+   - Make sure you installed the package: `pip install -e .`
+
+2. **"GROMACS binary not found"**
+   - Ensure GROMACS is loaded in your environment or added to PATH
+   - Test with: `gmx --version`
+
+3. **Polyply solvent errors**
+   - Verify the solvent name matches Polyply's supported solvents (OCO, W, CLF)
+   - Check that force field files exist at the specified `gromacs_path`
+
+4. **Path resolution failures**
+   - Use absolute paths for custom directories or verify working directory
+   - Package data uses relative paths from installed location
+
+## Comparison to Original Script
+
+| Feature | Original (`run_simulation.py`) | Martini Harness (Package) |
+|---------|-------------------------------|---------------------------|
+| Configuration | Hardcoded Python variables | YAML files with Pydantic validation |
+| Multiple targets | Iteration over list in script | Config-driven campaign execution |
+| Reproducibility | Limited | Full config file + version control |
+| Extensibility | Difficult | Modular, extensible classes |
+| CLI support | Manual argument parsing | Built-in argparse commands |
+| Logging | Basic print statements | Python logging with levels |
+
+## License
+
+Same as the original `run_simulation.py` script.
