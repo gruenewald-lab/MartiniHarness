@@ -1,0 +1,71 @@
+; This file was generated using the following command:
+; /home/fgruenewald/ProgramDev/fast_forward/fast_forward/bin/ff_inter.py -f /home/fgruenewald/ProgramDev/DogPark/Bonded/runs/row4212/reference/mapped.xtc -s /home/fgruenewald/ProgramDev/DogPark/Bonded/runs/row4212/reference/mapped.gro -i /home/fgruenewald/ProgramDev/DogPark/Bonded/runs/row4212/row42_build02.itp -temperature 298 -constraints 10000 -max-dihedral 10 -dihedral-scaling 1000 -dists /home/fgruenewald/ProgramDev/DogPark/Bonded/runs/row4212/fit_build02/reference_distributions -dist-matrix -lincs
+; 
+
+; Please cite the following papers:
+; {Brasnett, C; Fidlin, M; Duve, T; Thallmair, S; Marrink, S J; Grünewald, F;   {Journal of Chemical Information and Modeling  {2026;  {10.1021/acs.jcim.6c01107
+; Kroon, P C; Grunewald, F; Barnoud, J; van Tilburg, M; Souza, P C; Wassenaar, T A; Marrink, S J;  elife 2024; 10.7554/elife.90627.2
+
+[ moleculetype ]
+row42 1
+
+[ atoms ]
+1 TN2a 1 row42 TN2a0 1 0.0 36.0
+2 TN4a 1 row42 TN4a1 2 0.0 48.0
+3 TN5a 1 row42 TN5a2 3 0.0 0.0
+4 TN4a 1 row42 TN4aA3 4 0.0 48.0
+5 SN3a 1 row42 SN3a4 5 0.0 66.0
+6 TC3 1 row42 TC35 6 0.0 36.0
+7 TC3 1 row42 TC3B6 7 0.0 36.0
+8 TC3 1 row42 TC3A7 8 0.0 36.0
+
+[ bonds ]
+5 6 1 0.256 3628.966 ; SN3a4_TC35
+
+#ifdef FLEXIBLE
+1 2 1 0.327 10000 ; TN2a0_TN4a1
+1 4 1 0.256 10000 ; TN2a0_TN4aA3
+2 4 1 0.355 10000 ; TN4a1_TN4aA3
+2 5 1 0.472 10000 ; TN4a1_SN3a4
+4 5 1 0.279 10000 ; TN4aA3_SN3a4
+6 7 1 0.302 10000 ; TC35_TC3B6
+6 8 1 0.259 10000 ; TC35_TC3A7
+7 8 1 0.291 10000 ; TC3B6_TC3A7
+#endif
+
+[ constraints ]
+#ifndef FLEXIBLE
+1 2 1 0.327 ; TN2a0_TN4a1
+1 4 1 0.256 ; TN2a0_TN4aA3
+2 4 1 0.355 ; TN4a1_TN4aA3
+2 5 1 0.472 ; TN4a1_SN3a4
+4 5 1 0.279 ; TN4aA3_SN3a4
+6 7 1 0.302 ; TC35_TC3B6
+6 8 1 0.259 ; TC35_TC3A7
+7 8 1 0.291 ; TC3B6_TC3A7
+#endif
+
+[ angles ]
+4 5 6 1 122.381 23.729 ; TN4aA3_SN3a4_TC35
+5 6 7 1 85.136 48.551 ; SN3a4_TC35_TC3B6
+5 6 8 1 141.664 125.286 ; SN3a4_TC35_TC3A7
+
+[ dihedrals ]
+2 1 4 5 2 -0.286 18.404 ; TN4a1_TN2a0_TN4aA3_SN3a4
+
+; TN4aA3_SN3a4_TC35_TC3B6
+4 5 6 7 9 -175.794 -1.122 1 ; TN4aA3_SN3a4_TC35_TC3B6
+4 5 6 7 9 -179.467 -1.028 2 ; TN4aA3_SN3a4_TC35_TC3B6
+4 5 6 7 9 4.49 -0.641 3 ; TN4aA3_SN3a4_TC35_TC3B6
+
+[ virtual_sites3 ]
+3 2 4 5 1 -0.061 0.492 ; TN5a2_TN4a1_TN4aA3_SN3a4
+
+[ exclusions ]
+1 2 3 4 5 
+2 3 4 5 
+3 4 5 
+4 5 
+6 7 8 
+7 8 
+
