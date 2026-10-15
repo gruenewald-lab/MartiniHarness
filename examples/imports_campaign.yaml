@@ -1,0 +1,31 @@
+# The sample campaign assembled from shared files.
+#
+#   martini_harness run examples/imports_campaign.yaml --dry-run
+#
+# Imported files are deep-merged in order, then the keys below are merged on
+# top: mappings merge key by key, lists and scalars are replaced.
+
+imports:
+  - shared/molecules.yaml
+  - shared/solvation_pipeline.yaml
+
+title: Solvation campaign from shared files
+output_dir: ../campaigns/imports
+
+matrix:
+  target: [row42]
+  solvent: [W, OCO, CLF]
+  include:
+    - solvent: W
+      density: 997.0
+    - solvent: OCO
+      density: 827.0
+    - solvent: CLF
+      n_solvent: 6000
+      density: 1480.0
+
+# Adjust a stage of the imported pipeline without copying it.
+stage_overrides:
+  awh:
+    mdp_params:
+      define: ""        # row42 has no TI-specific terms (awh.mdp sets -DTI)

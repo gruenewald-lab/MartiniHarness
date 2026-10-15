@@ -3,6 +3,12 @@
 Relative paths in a campaign file are resolved against the directory of that
 file, except ``stages[].mdp`` (relative to ``mdp_dir``) and
 ``topology.includes`` (relative to ``forcefield_dir``).
+
+A campaign file may list other YAML files under ``imports``. Each imported
+file is a partial campaign (and may import further files); they are
+deep-merged in order, then the importing file's own keys are merged on top.
+Mappings merge key by key, everything else (lists included) is replaced.
+Paths in an imported file are resolved against that file's directory.
 """
 
 import re
@@ -13,6 +19,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -28,6 +35,10 @@ DEFAULT_INCLUDES = ["martini_v3.0.0.itp", "martini_v3.0.0_solvents_v1.itp"]
 TOPOLOGY_STEP = "topology"
 COORDINATES_STEP = "coords"
 RESERVED_STEP_NAMES = {TOPOLOGY_STEP, COORDINATES_STEP}
+
+IMPORTS_KEY = "imports"
+# Top-level keys holding a path relative to the file that sets them.
+FILE_RELATIVE_KEYS = ("output_dir", "forcefield_dir", "mdp_dir")
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._+-]+$")
 
@@ -138,6 +149,10 @@ class CampaignConfig(_Model):
     matrix: MatrixConfig
     simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)
     stages: list[StageConfig] = Field(default_factory=default_stages)
+    stage_overrides: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Stage name -> keys deep-merged into that stage, e.g. of an imported pipeline.",
+    )
 
     @model_validator(mode="after")
     def _resolve_paths(self, info: ValidationInfo) -> "CampaignConfig":
@@ -151,6 +166,30 @@ class CampaignConfig(_Model):
         self.molecules = {
             name: _resolve(path, base_dir) for name, path in self.molecules.items()
         }
+        return self
+
+    @model_validator(mode="after")
+    def _apply_stage_overrides(self) -> "CampaignConfig":
+        stages = {stage.name: index for index, stage in enumerate(self.stages)}
+        for name, override in self.stage_overrides.items():
+            if name not in stages:
+                raise ValueError(
+                    f"stage_overrides: no stage named {name!r} (stages: {', '.join(stages)})"
+                )
+            if "name" in override:
+                raise ValueError(f"stage_overrides.{name}: a stage cannot be renamed")
+            index = stages[name]
+            merged = _deep_merge(self.stages[index].model_dump(exclude_unset=True), override)
+            try:
+                self.stages[index] = StageConfig.model_validate(merged)
+            except ValidationError as exc:
+                raise ValueError(
+                    "; ".join(
+                        ".".join(str(part) for part in ("stage_overrides", name, *error["loc"]))
+                        + f": {error['msg']}"
+                        for error in exc.errors()
+                    )
+                ) from exc
         return self
 
     @model_validator(mode="after")
@@ -178,22 +217,84 @@ def _resolve(path: Path, base_dir: Path) -> Path:
     return path if path.is_absolute() else (base_dir / path).resolve()
 
 
-def load_campaign(config_file: str | Path) -> CampaignConfig:
-    """Load and validate a campaign YAML file.
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``override`` into a copy of ``base``; only mappings merge recursively."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_mapping(path: Path) -> dict[str, Any]:
+    try:
+        data = YAML(typ="safe").load(path.read_text()) or {}
+    except Exception as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path}: top level must be a mapping")
+    return data
+
+
+def _resolve_file_paths(data: dict[str, Any], base_dir: Path) -> None:
+    """Make the file-relative paths in one file's data absolute, in place."""
+    for key in FILE_RELATIVE_KEYS:
+        if isinstance(data.get(key), str):
+            data[key] = str(_resolve(Path(data[key]), base_dir))
+    molecules = data.get("molecules")
+    if isinstance(molecules, dict):
+        for name, itp in molecules.items():
+            if isinstance(itp, str):
+                molecules[name] = str(_resolve(Path(itp), base_dir))
+
+
+def _load_with_imports(path: Path, chain: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Read ``path`` and merge its imports (recursively) underneath it.
+
+    Args:
+        path: Absolute path of the file to load.
+        chain: Files currently being imported, outermost first; used to
+            detect cycles.
 
     Raises:
-        ConfigError: If the file cannot be parsed or fails validation.
+        ConfigError: On unreadable or missing files, malformed ``imports``
+            or an import cycle.
+    """
+    data = _read_mapping(path)
+    imports = data.pop(IMPORTS_KEY, None) or []
+    if isinstance(imports, str):
+        imports = [imports]
+    if not isinstance(imports, list) or not all(isinstance(entry, str) for entry in imports):
+        raise ConfigError(f"{path}: {IMPORTS_KEY} must be a file name or a list of file names")
+    _resolve_file_paths(data, path.parent)
+
+    merged: dict[str, Any] = {}
+    for entry in imports:
+        imported = _resolve(Path(entry), path.parent)
+        if imported in (*chain, path):
+            cycle = " -> ".join(str(file) for file in (*chain, path, imported))
+            raise ConfigError(f"import cycle: {cycle}")
+        if not imported.is_file():
+            raise ConfigError(f"{path}: imported file not found: {entry} ({imported})")
+        merged = _deep_merge(merged, _load_with_imports(imported, (*chain, path)))
+    return _deep_merge(merged, data)
+
+
+def load_campaign(config_file: str | Path) -> CampaignConfig:
+    """Load and validate a campaign YAML file, including its imports.
+
+    Raises:
+        ConfigError: If a file cannot be read or parsed, an import is
+            missing or cyclic, or the merged campaign fails validation.
     """
     config_file = Path(config_file)
+    path = config_file.expanduser().resolve()
+    if not path.is_file():
+        raise ConfigError(f"cannot read {config_file}: file not found")
+    data = _load_with_imports(path)
     try:
-        data = YAML(typ="safe").load(config_file.read_text()) or {}
-    except Exception as exc:
-        raise ConfigError(f"cannot read {config_file}: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ConfigError(f"{config_file}: top level must be a mapping")
-    try:
-        return CampaignConfig.model_validate(
-            data, context={"base_dir": config_file.resolve().parent}
-        )
+        return CampaignConfig.model_validate(data, context={"base_dir": path.parent})
     except ValueError as exc:
         raise ConfigError(f"{config_file}: {exc}") from exc

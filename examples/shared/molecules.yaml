@@ -1,0 +1,5 @@
+# Shared molecule library. Paths are relative to this file, not to the
+# campaign that imports it.
+
+molecules:
+  row42: ../row42.itp

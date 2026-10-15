@@ -77,10 +77,59 @@ complete, runnable file.
 
 ### Paths
 
-Relative paths are resolved against the campaign file's directory, except
+Relative paths are resolved against the directory of the file that sets
+them (the campaign file or an [imported file](#imports)), except
 `stages[].mdp` (against `mdp_dir`) and `topology.includes` (against
 `forcefield_dir`). `forcefield_dir` and `mdp_dir` default to the Martini 3
 ITPs and MDP files shipped in `martini_harness/data`.
+
+### Imports
+
+Parts of a campaign, such as a stage pipeline, a molecule library, topology
+includes or simulation defaults, can live in separate YAML files and be
+reused across campaigns:
+
+```yaml
+# campaign.yaml
+imports:
+  - shared/molecules.yaml            # relative to this file
+  - shared/solvation_pipeline.yaml
+matrix:
+  target: [row42]
+  solvent: [W, OCO]
+stage_overrides:                     # tweak one stage of the imported pipeline
+  awh:
+    mdp_params: {nsteps: 500000}
+    mdrun: {nt: 8}
+
+# shared/molecules.yaml
+molecules:
+  row42: ../row42.itp                # relative to shared/
+
+# shared/solvation_pipeline.yaml
+stages:
+  - {name: min, mdp: min.mdp}
+  - {name: eq, mdp: eq.mdp, maxwarn: 2}
+  - {name: awh, mdp: awh.mdp, substitute: {TOCOUPLE: "{target}"}}
+```
+
+- An imported file is a partial campaign with the same keys. It may import
+  further files itself; only the merged result has to be a complete campaign.
+- Imports are merged in the order listed, then the importing file's own keys
+  are merged on top, so later files win and the importing file wins over
+  everything it imports.
+- Mappings (`simulation`, `molecules`, `matrix`, ...) are merged key by key.
+  Lists (`stages`, `topology.includes`, matrix axes, `include`/`exclude`) and
+  scalars are replaced as a whole.
+- `stage_overrides` maps a stage name to keys that are merged into that stage
+  (mappings key by key, anything else replaced), after all imports. Naming a
+  stage that does not exist is an error. It also works on the default
+  pipeline.
+- An import cycle (`a.yaml` → `b.yaml` → `a.yaml`) or a missing imported file
+  is an error. Importing the same file through two routes is fine.
+
+See [examples/imports_campaign.yaml](examples/imports_campaign.yaml), which
+builds the sample campaign from the files in `examples/shared/`.
 
 ### Matrix
 
@@ -119,7 +168,9 @@ stages in order. Each stage runs `grompp` and `mdrun -deffnm <name>`.
 | `mdrun`      | Extra mdrun flags, e.g. `{nt: 8, v: true}`                              |
 
 String values may use template variables. If `stages` is omitted, the
-default pipeline is `min` → `eq` → `awh`.
+default pipeline is `min` → `eq` → `awh`. Use `stage_overrides`
+(see [Imports](#imports)) to change a single stage of an imported or the
+default pipeline.
 
 ## Output and resuming
 
@@ -164,6 +215,6 @@ martini_harness/
 ├── mdp.py          # MDP rendering and templating
 ├── topology.py     # topology writing, ITP parsing
 └── data/           # Martini 3 ITPs and MDP templates
-examples/           # sample campaign and molecule
+examples/           # sample campaigns, shared import files, molecule
 tests/
 ```
