@@ -172,6 +172,23 @@ default pipeline is `min` → `eq` → `awh`. Use `stage_overrides`
 (see [Imports](#imports)) to change a single stage of an imported or the
 default pipeline.
 
+### Global mdrun flags
+
+Machine-specific flags can be set once for all stages under a top-level
+`mdrun` key:
+
+```yaml
+mdrun:
+  bonded: gpu
+  ntomp: 8
+  ntmpi: 1
+```
+
+They are passed to every stage except energy minimizations (stages whose
+MDP uses `integrator = steep`, `cg` or `l-bfgs`). A stage's own `mdrun`
+flags take precedence. Because these flags describe the machine rather than
+the simulation, changing them does not rerun finished steps.
+
 ## Output and resuming
 
 Each simulation gets a directory `<output_dir>/<name>/` containing

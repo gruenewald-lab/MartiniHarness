@@ -3,6 +3,8 @@
 import string
 from typing import Any
 
+MINIMIZATION_INTEGRATORS = {"steep", "cg", "l-bfgs"}
+
 
 class TemplateError(ValueError):
     """Raised when a template references an unknown variable or placeholder."""
@@ -73,6 +75,23 @@ def set_mdp_params(text: str, params: dict[str, Any]) -> str:
         if key not in found:
             lines.append(_format_param(name, value))
     return "\n".join(lines) + "\n"
+
+
+def get_mdp_param(text: str, key: str) -> str | None:
+    """Return the value of ``key`` in MDP ``text`` (last entry wins), or None."""
+    wanted = _normalize(key)
+    value = None
+    for line in text.splitlines():
+        name, sep, raw_value = line.split(";", 1)[0].partition("=")
+        if sep and _normalize(name) == wanted:
+            value = raw_value.strip()
+    return value
+
+
+def is_minimization(text: str) -> bool:
+    """Whether the MDP uses an energy-minimization integrator."""
+    integrator = get_mdp_param(text, "integrator") or "md"
+    return integrator.lower() in MINIMIZATION_INTEGRATORS
 
 
 def _normalize(key: str) -> str:

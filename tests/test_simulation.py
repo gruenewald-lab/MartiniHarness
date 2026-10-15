@@ -148,3 +148,28 @@ def test_force_reruns_everything(campaign_file, fake_backend):
     run_campaign(_simulations(path), fake_backend)
     outcomes = run_campaign(_simulations(path), FakeBackend(), force=True)
     assert all(o.ran == ALL_STEPS for o in outcomes)
+
+
+def test_global_mdrun_flags_skip_minimization(campaign_file, fake_backend):
+    body = BASIC_CAMPAIGN + """
+    mdrun: {bonded: gpu, ntomp: 8, ntmpi: 1}
+    stages:
+      - {name: min, mdp: min.mdp}
+      - {name: eq, mdp: eq.mdp, maxwarn: 2, mdrun: {ntomp: 4}}
+      - {name: awh, mdp: awh.mdp, substitute: {TOCOUPLE: "{target}"}}
+    """
+    run_campaign(_simulations(campaign_file(body))[:1], fake_backend)
+
+    mdruns = {flags["deffnm"].name: flags for kind, flags in fake_backend.calls if kind == "mdrun"}
+    assert not {"bonded", "ntomp", "ntmpi"} & set(mdruns["min"])
+    assert (mdruns["eq"]["bonded"], mdruns["eq"]["ntomp"], mdruns["eq"]["ntmpi"]) == ("gpu", 4, 1)
+    assert (mdruns["awh"]["bonded"], mdruns["awh"]["ntomp"], mdruns["awh"]["ntmpi"]) == ("gpu", 8, 1)
+
+
+def test_changing_global_mdrun_flags_does_not_rerun(campaign_file, fake_backend):
+    path = campaign_file(BASIC_CAMPAIGN)
+    run_campaign(_simulations(path), fake_backend)
+
+    path = campaign_file(BASIC_CAMPAIGN + "    mdrun: {ntomp: 16}\n")
+    outcomes = run_campaign(_simulations(path), FakeBackend())
+    assert all(o.ran == [] for o in outcomes)

@@ -43,6 +43,13 @@ matrix:
       n_solvent: 6000
       density: 1480.0
 
+# mdrun flags for every stage except energy minimizations (steep/cg/l-bfgs).
+# A stage's own `mdrun` flags win. Changing these does not rerun finished steps.
+# mdrun:
+#   bonded: gpu
+#   ntomp: 8
+#   ntmpi: 1
+
 # The pipeline, run in order after topology and coordinate generation.
 # Each stage takes the .gro file of the previous stage unless `input` is set.
 stages:

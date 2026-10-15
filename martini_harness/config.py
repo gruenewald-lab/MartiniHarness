@@ -153,6 +153,13 @@ class CampaignConfig(_Model):
         default_factory=dict,
         description="Stage name -> keys deep-merged into that stage, e.g. of an imported pipeline.",
     )
+    mdrun: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "mdrun flags for every stage except energy minimizations, e.g. "
+            "{bonded: gpu, ntomp: 8, ntmpi: 1}. A stage's own mdrun flags take precedence."
+        ),
+    )
 
     @model_validator(mode="after")
     def _resolve_paths(self, info: ValidationInfo) -> "CampaignConfig":

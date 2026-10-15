@@ -2,8 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from martini_harness.config import DEFAULT_FORCEFIELD_DIR
-from martini_harness.mdp import TemplateError, render_mdp, render_value, set_mdp_params
+from martini_harness.config import DEFAULT_FORCEFIELD_DIR, DEFAULT_MDP_DIR
+from martini_harness.mdp import (
+    TemplateError,
+    get_mdp_param,
+    is_minimization,
+    render_mdp,
+    render_value,
+    set_mdp_params,
+)
 from martini_harness.topology import read_moleculetypes, render_topology
 
 TEMPLATE = """\
@@ -51,3 +58,12 @@ def test_render_topology():
     text = render_topology([Path("/ff/a.itp")], "sys", [("row42", 1), ("W", 10)])
     assert text.splitlines()[0] == '#include "/ff/a.itp"'
     assert "[ molecules ]\nrow42      1\nW          10\n" in text
+
+
+def test_is_minimization():
+    assert get_mdp_param(TEMPLATE, "Couple_Moltype") == "TOCOUPLE"
+    assert get_mdp_param(TEMPLATE, "tcoupl") is None
+    assert is_minimization("integrator = steep ; comment\n")
+    assert not is_minimization("nsteps = 10\n")  # GROMACS default integrator is md
+    assert is_minimization((DEFAULT_MDP_DIR / "min.mdp").read_text())
+    assert not any(is_minimization((DEFAULT_MDP_DIR / f).read_text()) for f in ("eq.mdp", "awh.mdp"))

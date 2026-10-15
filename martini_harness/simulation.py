@@ -27,7 +27,7 @@ from .config import (
     SAFE_NAME,
 )
 from .matrix import expand_matrix
-from .mdp import TemplateError, render_mdp, render_value
+from .mdp import TemplateError, is_minimization, render_mdp, render_value
 from .state import DONE, FAILED, StateFile
 from .topology import read_moleculetypes, render_topology
 
@@ -235,6 +235,11 @@ def _stage_step(
         )
         grompp_flags = render_value(stage.grompp, spec.variables)
         mdrun_flags = render_value(stage.mdrun, spec.variables)
+        # Campaign-wide mdrun flags (threads, GPU offload) are about the
+        # machine, not the result, so they stay out of the step signature.
+        global_mdrun_flags = (
+            {} if is_minimization(mdp_text) else render_value(config.mdrun, spec.variables)
+        )
     except TemplateError as exc:
         raise ConfigError(f"stage {stage.name!r}: {exc}") from exc
 
@@ -258,7 +263,7 @@ def _stage_step(
             log=workdir / f"{stage.name}.grompp.out",
         )
         backend.mdrun(
-            {"s": tpr_file, "deffnm": workdir / stage.name, **mdrun_flags},
+            {"s": tpr_file, "deffnm": workdir / stage.name, **global_mdrun_flags, **mdrun_flags},
             log=workdir / f"{stage.name}.mdrun.out",
         )
 
