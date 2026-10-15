@@ -5,29 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "martini_harness"
 version = "0.1.0"
-description = "A Python framework for dispatching Martini MD simulation campaigns from YAML configs"
+description = "Dispatch Martini MD simulation campaigns from YAML files"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "Felix Gruenewald", email = "felix.gruenewald@example.com" }
+    { name = "Fabian Gruenewald", email = "fgrunewald.science@gmail.com" }
 ]
 requires-python = ">=3.10"
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
 ]
 
 dependencies = [
     "ruamel.yaml>=0.17.0",
     "pydantic>=2.0",
-    "GromacsWrapper>=0.7.0",
+    "GromacsWrapper>=0.8.0",
     "polyply>=1.0",
-    "vermouth>=0.15.0",
+    "vermouth>=0.10.0",
 ]
 
 [project.optional-dependencies]
@@ -35,12 +32,17 @@ dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
-    "mypy>=1.0",
 ]
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["martini_harness*"]
 
 [project.scripts]
 martini_harness = "martini_harness.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["martini_harness*"]
+
+[tool.setuptools.package-data]
+martini_harness = ["data/gmx_files/*.itp", "data/mdp_files/*.mdp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["gromacs: runs real polyply and GROMACS (skipped if gmx is not on PATH)"]

@@ -1,2 +1,0 @@
-[console_scripts]
-martini_harness = martini_harness.cli:main

@@ -1,232 +1,169 @@
 # Martini Harness
 
-A modular Python framework for running MD simulation campaigns using Gromacs Wrapper and Polyply.
+Run campaigns of Martini simulations defined in a single YAML file. A build
+matrix (as in GitHub Actions workflows) expands into one simulation per
+combination of target molecule, solvent and parameters. Each simulation
+builds a topology, generates coordinates with
+[polyply](https://github.com/marrink-lab/polyply_1.0) and runs a configurable
+pipeline of GROMACS stages via
+[GromacsWrapper](https://github.com/Becksteinlab/GromacsWrapper).
 
-## Overview
-
-`martini_harness` converts the original `run_simulation.py` monolithic script into a flexible package that can:
-
-- Load simulation configurations from YAML files
-- Run multiple target molecules with different solvents in a single campaign
-- Generate coordinates using Polyply
-- Execute GROMACS simulations via the `gromacs` module
-- Support custom MDP parameters and workflow steps
+Simulations run one after another. Progress is recorded per simulation, so
+rerunning the same command resumes where it stopped and reruns only what
+changed.
 
 ## Installation
 
-### From Source (Development)
-
 ```bash
-# Navigate to repository root
-cd /home/fgruenewald/ProgramDev/MartiniHarness
-
-# Install in editable mode with dependencies
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-This will install the `martini_harness` package and all required dependencies:
-- `polyply`: Coordinate generation for Martini force field
-- `gromacs`: GROMACS Wrapper for running simulations
-- `pydantic-settings`: Configuration management
-- `ruamel.yaml`: YAML parsing and generation
+GROMACS (`gmx`) must be on your `PATH`. Requires Python 3.10+.
 
 ## Usage
 
-### Command Line Interface
-
-The package provides a CLI with three main commands:
-
 ```bash
-# Run a simulation campaign from YAML config
-martini_harness run <config_file> [--output-dir <dir>] [--dry-run]
-
-# List target molecules available in the system (from itp files)
-martini_harness list-molecules <molecule_list_file>
-
-# Initialize a sample YAML configuration file
-martini_harness init-config <name> --solvent <OCO|W|CLF> --target <molecule>
+martini_harness run examples/sample_campaign.yaml --dry-run   # show what would run
+martini_harness run examples/sample_campaign.yaml             # run / resume
+martini_harness status examples/sample_campaign.yaml          # progress per step
+martini_harness list-molecules examples/row42.itp             # molecule types in ITPs
 ```
 
-### Examples
+`run` and `status` accept `--only NAME` (repeatable) to select simulations and
+`-o DIR` to override the output directory. `run --force` ignores saved state
+and reruns everything. `python -m martini_harness` works as well.
 
-#### Running a Campaign
-
-1. **Create or edit a YAML configuration:**
+## Campaign file
 
 ```yaml
-title: "My Simulation Campaign"
-output_base: "./campaigns/my_results"
-gromacs_path: "/path/to/gmx_forcefield"  # optional
-mdp_directory: "/path/to/mdp_files"       # optional
+title: Sample Martini solvation campaign
+output_dir: ../campaigns/sample        # relative to this file
 
-simulations:
-  - name: "target_in_water"
-    target_molecule: "row42"
-    solvent: "W"
-    n_target: 1
-    n_solvent: 8000
-    density: 997.0
-    
-  - name: "target_in_chloroform"
-    target_molecule: "row42"
-    solvent: "CLF"
-    n_target: 1
-    n_solvent: 6000
-    density: 815.0
+topology:
+  includes:                            # relative to forcefield_dir
+    - martini_v3.0.0.itp
+    - martini_v3.0.0_solvents_v1.itp
+
+molecules:                             # targets not in the includes
+  row42: row42.itp
+
+simulation:                            # defaults, overridable per combination
+  name: "{target}_in_{solvent}"
+  n_target: 1
+  n_solvent: 8000
+  density: 900.0
+
+matrix:
+  target: [row42]
+  solvent: [W, OCO, CLF]
+  include:
+    - {solvent: W, density: 997.0}
+    - {solvent: CLF, n_solvent: 6000, density: 1480.0}
+  exclude: []
+
+stages:
+  - name: min
+    mdp: min.mdp                       # relative to mdp_dir
+  - name: eq
+    mdp: eq.mdp
+    maxwarn: 2
+  - name: awh
+    mdp: awh.mdp
+    substitute: {TOCOUPLE: "{target}"}
 ```
 
-2. **Run the campaign:**
+See [examples/sample_campaign.yaml](examples/sample_campaign.yaml) for a
+complete, runnable file.
+
+### Paths
+
+Relative paths are resolved against the campaign file's directory, except
+`stages[].mdp` (against `mdp_dir`) and `topology.includes` (against
+`forcefield_dir`). `forcefield_dir` and `mdp_dir` default to the Martini 3
+ITPs and MDP files shipped in `martini_harness/data`.
+
+### Matrix
+
+The matrix follows GitHub Actions semantics:
+
+1. Every key other than `include`/`exclude` is an axis; the Cartesian product
+   of the axes gives the original combinations.
+2. `exclude` entries remove every combination they match (partial matches
+   allowed).
+3. `include` entries are merged into every original combination whose axis
+   values they do not contradict; values added by an earlier include may be
+   overwritten. An entry that matches no combination is added as a new one.
+   A matrix may consist of `include` entries only.
+
+Every combination needs `target` and `solvent`. Keys named like a
+`simulation` field (`name`, `n_target`, `n_solvent`, `density`) override that
+field; all keys are available as template variables, e.g. `"{temperature}"`.
+Target and solvent must be defined in the topology includes or in
+`molecules`; this is checked before anything runs.
+
+### Stages
+
+Every simulation starts with two fixed steps, `topology` (writes
+`system.top`) and `coords` (polyply writes `init.gro`), followed by the
+stages in order. Each stage runs `grompp` and `mdrun -deffnm <name>`.
+
+| key          | meaning                                                                 |
+|--------------|-------------------------------------------------------------------------|
+| `name`       | Stage name, used as file prefix (`topology`/`coords` are reserved)      |
+| `mdp`        | MDP template                                                            |
+| `input`      | Step whose `.gro` is the input structure (default: previous step)       |
+| `maxwarn`    | Passed to grompp (default 0)                                            |
+| `substitute` | Literal placeholder replacements in the MDP, e.g. `TOCOUPLE: "{target}"`|
+| `mdp_params` | MDP parameters to set or override, e.g. `{nsteps: 1000}`                |
+| `grompp`     | Extra grompp flags, e.g. `{n: /abs/path/index.ndx}`                     |
+| `mdrun`      | Extra mdrun flags, e.g. `{nt: 8, v: true}`                              |
+
+String values may use template variables. If `stages` is omitted, the
+default pipeline is `min` → `eq` → `awh`.
+
+## Output and resuming
+
+Each simulation gets a directory `<output_dir>/<name>/` containing
+`system.top`, `init.gro`, the rendered `<stage>.mdp`, all GROMACS outputs, the
+program output (`<stage>.grompp.out`, `<stage>.mdrun.out`, `coords.log`), the
+resolved parameters (`simulation.json`) and the state file
+(`.harness_state.json`).
+
+Each step gets a key: a hash of its inputs (topology and included ITP files,
+rendered MDP, flags, density, ...) chained with the previous step's key. A
+step is skipped when the state file records it as done with the same key and
+its outputs still exist; once a step runs, every later step runs too. So
+editing a stage's MDP reruns that stage and everything after it, while
+changing `density` reruns everything from `coords` on.
+
+A failing step stops its simulation and is recorded in the state file
+(`status` shows the error); the campaign continues with the next simulation.
+`run` exits with code 1 if any simulation failed and 2 for configuration
+errors.
+
+## Development
 
 ```bash
-martini_harness run sample_campaign.yaml --output-dir ./campaigns/test
+pytest                    # all tests
+pytest -m "not gromacs"   # skip the end-to-end test that needs gmx
 ```
 
-#### Dry Run (Check Configuration)
+Most tests use a fake backend (see `tests/conftest.py`) instead of polyply and
+GROMACS. `martini_harness/backend.py` is the only module that calls them.
 
-To verify your configuration without running simulations:
-
-```bash
-martini_harness run sample_campaign.yaml --dry-run
-```
-
-This will print the parsed configuration and show what would be executed.
-
-### Programmatic Usage
-
-You can also use `martini_harness` directly in Python scripts:
-
-```python
-from pathlib import Path
-from martini_harness.config import load_yaml_config, dump_config_to_yaml
-from martini_harness.simulation import SimulationCampaign
-
-# Load configuration
-config = load_yaml_config("sample_campaign.yaml")
-
-# Create a campaign instance
-campaign = SimulationCampaign(config)
-
-# Run the full campaign (if not dry run)
-if config.dry_run:
-    print("Dry-run mode - would execute:")
-    for sim in campaign.simulations:
-        print(f"  - {sim.config.name}")
-else:
-    campaign.run()
-```
-
-## Configuration Details
-
-### YAML Structure
-
-The configuration file supports the following structure:
-
-```yaml
-# Campaign-level settings
-title: "Campaign Name"
-output_base: "./campaigns/output"
-
-gromacs_path: "/absolute/path/to/forcefield"  # optional, defaults to package data
-mdp_directory: "/absolute/path/to/mdp_files"  # optional, defaults to package data
-
-simulations:
-  - name: "unique_identifier"           # required
-    target_molecule: "molecule_name"    # required, matches itp file stem
-    solvent: "OCO|W|CLF"               # required, must be valid Polyply solvent
-    
-    n_target: 1                         # optional, default=1
-    n_solvent: 8000                     # optional, default=8000
-    density: 900.0                      # optional, default=900 (kg/m³)
-    
-    mdp_files:                          # optional, list of step configs
-      - name: "minimization"
-        mdp_file: "awh.mdp"
-        maxwarn: 4
-    
-    extra_args:                         # optional, passed to grompp/mdrun
-      steps: "em"
-```
-
-### Default Simulation Steps
-
-If no custom MDP files are specified, the framework uses default GROMACS workflow:
-1. **Minimization** - `awh.mdp` (steepest descent energy minimization)
-2. **NVT Equilibration** - `nvt.mdp` (constant temperature)
-3. **NPT Equilibration** - `npt.mdp` (constant pressure and temperature)
-4. **Production MD** - `md.mdp` (production simulation)
-
-## Package Structure
+## Package layout
 
 ```
 martini_harness/
-├── __init__.py          # Package initialization, logging setup, path helpers
-├── config.py            # Pydantic configuration models, YAML I/O
-├── simulation.py        # Core simulation classes and workflow logic
-├── cli.py               # Command-line interface with argparse
-data/
-├── gmx_files/           # GROMACS force field files (martini_v3*)
-├── mdp_files/           # MDP parameter files (*.mdp)
-└── row42.itp            # Example molecule topology
+├── cli.py          # command-line interface
+├── config.py       # YAML schema (pydantic) and loading
+├── matrix.py       # build-matrix expansion
+├── simulation.py   # simulations, steps, resume logic, campaign runner
+├── state.py        # per-simulation state file
+├── backend.py      # polyply / GROMACS execution
+├── mdp.py          # MDP rendering and templating
+├── topology.py     # topology writing, ITP parsing
+└── data/           # Martini 3 ITPs and MDP templates
+examples/           # sample campaign and molecule
+tests/
 ```
-
-## Key Components
-
-### 1. Configuration Models (`config.py`)
-
-- `CampaignConfig`: Top-level campaign settings with path resolution
-- `SimulationConfig`: Individual simulation parameters
-- `SimulationStep`: Custom GROMACS workflow steps (optional)
-
-### 2. Simulation Engine (`simulation.py`)
-
-- `SimulationCampaign`: Manages the full campaign execution
-- `CoordinateGenerator`: Uses Polyply to generate system coordinates
-- `SimulationRunner`: Executes GROMACS commands via the `gromacs` module
-- `write_topology`: Helper for combining force field and molecule topologies
-
-### 3. CLI (`cli.py`)
-
-```
-martini_harness [COMMAND] [OPTIONS] COMMAND [ARGS]...
-```
-
-## Requirements
-
-- **Python**: 3.9+
-- **GROMACS binaries**: Must be in PATH (gmx, grompp, mdrun)
-- **Polyply**: For coordinate generation (`pip install polyply`)
-- **GromacsWrapper** (module `gromacs`): For running simulations (`pip install gromacs`)
-
-## Troubleshooting
-
-### Common Issues
-
-1. **"No module named 'martini_harness'"**
-   - Make sure you installed the package: `pip install -e .`
-
-2. **"GROMACS binary not found"**
-   - Ensure GROMACS is loaded in your environment or added to PATH
-   - Test with: `gmx --version`
-
-3. **Polyply solvent errors**
-   - Verify the solvent name matches Polyply's supported solvents (OCO, W, CLF)
-   - Check that force field files exist at the specified `gromacs_path`
-
-4. **Path resolution failures**
-   - Use absolute paths for custom directories or verify working directory
-   - Package data uses relative paths from installed location
-
-## Comparison to Original Script
-
-| Feature | Original (`run_simulation.py`) | Martini Harness (Package) |
-|---------|-------------------------------|---------------------------|
-| Configuration | Hardcoded Python variables | YAML files with Pydantic validation |
-| Multiple targets | Iteration over list in script | Config-driven campaign execution |
-| Reproducibility | Limited | Full config file + version control |
-| Extensibility | Difficult | Modular, extensible classes |
-| CLI support | Manual argument parsing | Built-in argparse commands |
-| Logging | Basic print statements | Python logging with levels |
-
-## License
-
-Same as the original `run_simulation.py` script.

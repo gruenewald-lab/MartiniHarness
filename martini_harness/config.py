@@ -1,171 +1,199 @@
-"""Configuration handling for simulation campaigns."""
+"""Campaign configuration: YAML schema and loading.
 
+Relative paths in a campaign file are resolved against the directory of that
+file, except ``stages[].mdp`` (relative to ``mdp_dir``) and
+``topology.includes`` (relative to ``forcefield_dir``).
+"""
+
+import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
-import pydantic
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from ruamel.yaml import YAML
 
+PACKAGE_DATA = Path(__file__).parent / "data"
+DEFAULT_FORCEFIELD_DIR = PACKAGE_DATA / "gmx_files"
+DEFAULT_MDP_DIR = PACKAGE_DATA / "mdp_files"
+DEFAULT_INCLUDES = ["martini_v3.0.0.itp", "martini_v3.0.0_solvents_v1.itp"]
 
-class SimulationStep(BaseModel):
-    """A single simulation step configuration.
+# Steps that run before the user-defined stages; stage names may not clash.
+TOPOLOGY_STEP = "topology"
+COORDINATES_STEP = "coords"
+RESERVED_STEP_NAMES = {TOPOLOGY_STEP, COORDINATES_STEP}
 
-    Attributes:
-        name: Name of the simulation step (e.g., "minimization", "equilibration").
-        mdp_file: Path to the MDP configuration file.
-        input_structure: Input structure file pattern or specific file.
-        output_prefix: Prefix for output files (without extension).
-        maxwarn: Maximum number of GROMACS warnings to ignore.
-        extra_args: Extra arguments to pass to grompp/mdrun.
+SAFE_NAME = re.compile(r"^[A-Za-z0-9._+-]+$")
+
+Scalar = str | int | float | bool
+
+
+class ConfigError(ValueError):
+    """Raised when a campaign configuration is invalid."""
+
+
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class StageConfig(_Model):
+    """One grompp + mdrun step of the simulation pipeline.
+
+    String values in ``substitute``, ``mdp_params``, ``grompp`` and ``mdrun``
+    may reference matrix variables, e.g. ``"{target}"``.
     """
 
     name: str
-    mdp_file: str
-    input_structure: str | None = None  # Will default based on step order
-    output_prefix: str | None = None
-    maxwarn: int = Field(default=4, ge=0)
-    extra_args: dict[str, Any] = Field(default_factory=dict)
+    mdp: str
+    input: str | None = Field(
+        default=None,
+        description="Step whose .gro file is the input structure (default: previous step).",
+    )
+    maxwarn: int = Field(default=0, ge=0)
+    substitute: dict[str, str] = Field(
+        default_factory=dict, description="Literal placeholder replacements in the MDP."
+    )
+    mdp_params: dict[str, Scalar | list[Scalar]] = Field(
+        default_factory=dict, description="MDP parameters to set or override."
+    )
+    grompp: dict[str, Any] = Field(default_factory=dict, description="Extra grompp flags.")
+    mdrun: dict[str, Any] = Field(default_factory=dict, description="Extra mdrun flags.")
 
-    @model_validator(mode="after")
-    def set_defaults(self) -> "SimulationStep":
-        """Set default values if not provided."""
-        if self.output_prefix is None:
-            self.output_prefix = self.name
-        return self
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, name: str) -> str:
+        if not SAFE_NAME.match(name):
+            raise ValueError(f"stage name {name!r} may only contain letters, digits and ._+-")
+        if name in RESERVED_STEP_NAMES:
+            raise ValueError(f"stage name {name!r} is reserved")
+        return name
 
 
-class SimulationConfig(BaseModel):
-    """Configuration for a single simulation run.
+class SimulationDefaults(_Model):
+    """Per-simulation parameters; every field can be overridden by the matrix."""
 
-    Attributes:
-        name: Name of the simulation (e.g., "target_in_solvent").
-        target_molecule: Name or identifier of the target molecule.
-        solvent: Type of solvent to use.
-        n_target: Number of target molecules.
-        n_solvent: Number of solvent molecules.
-        density: Target density in kg/m³.
-        pforce: Positional restraint force constant (kJ/mol/nm²).
-        mdp_files: List of MDP files for each step.
-    """
-
-    name: str
-    target_molecule: str
-    solvent: str
+    name: str = "{target}_in_{solvent}"
     n_target: int = Field(default=1, ge=1)
     n_solvent: int = Field(default=8000, ge=1)
-    density: float = Field(default=900.0, gt=0)
-    pforce: float = Field(default=800_000.0, ge=0)
-    mdp_files: list[str] = []
-
-    model_config = pydantic.ConfigDict(extra="ignore")
+    density: float = Field(default=900.0, gt=0, description="Target density in kg/m^3.")
 
 
-class CampaignConfig(BaseModel):
-    """Configuration for a full simulation campaign.
+class MatrixConfig(BaseModel):
+    """Build matrix: every key other than include/exclude is an axis."""
 
-    Attributes:
-        title: Title/description of the campaign.
-        output_dir: Directory for all simulation outputs.
-        simulations: List of individual simulations to run.
-        gromacs_path: Path to GROMACS force field directory.
-        mdp_directory: Directory containing MDP files.
-    """
+    model_config = ConfigDict(extra="allow")
 
-    model_config = ConfigDict(
-        env_prefix="MARTINI_",
-        extra="ignore",
-        populate_by_name=True,
-    )
-
-    title: str = "Unnamed Campaign"
-    output_base: Path = Field(default=Path("./campaigns"), description="Base output directory")
-    simulations: list[SimulationConfig] = []
-
-    # Paths - will be resolved relative to package or absolute
-    gromacs_path: str | None = None
-    mdp_directory: str | None = None
+    include: list[dict[str, Scalar]] = Field(default_factory=list)
+    exclude: list[dict[str, Scalar]] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def resolve_paths(self) -> "CampaignConfig":
-        """Resolve relative paths to absolute paths."""
-        if self.gromacs_path and not Path(self.gromacs_path).is_absolute():
-            # Resolve relative to current working directory
-            self.gromacs_path = str(Path(self.gromacs_path).resolve())
-
-        if self.mdp_directory and not Path(self.mdp_directory).is_absolute():
-            self.mdp_directory = str(Path(self.mdp_directory).resolve())
-
+    def _check_axes(self) -> "MatrixConfig":
+        for axis, values in self.axes.items():
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"matrix axis {axis!r} must be a non-empty list")
+            if not all(isinstance(value, Scalar) for value in values):
+                raise ValueError(f"matrix axis {axis!r} may only contain scalar values")
+        if not self.axes and not self.include:
+            raise ValueError("matrix needs at least one axis or include entry")
         return self
 
-    def get_gmx_files_dir(self) -> Path:
-        """Get the GROMACS force field files directory."""
-        if self.gromacs_path:
-            return Path(self.gromacs_path)
-        # Default to package data location
-        from martini_harness import get_package_data_path
-        return get_package_data_path("gmx_files")
-
-    def get_mdp_dir(self) -> Path:
-        """Get the MDP files directory."""
-        if self.mdp_directory:
-            return Path(self.mdp_directory)
-        # Default to package data location
-        from martini_harness import get_package_data_path
-        return get_package_data_path("mdp_files")
+    @property
+    def axes(self) -> dict[str, list[Any]]:
+        return dict(self.model_extra or {})
 
 
-def load_yaml_config(config_file: str | Path) -> CampaignConfig:
-    """Load a YAML configuration file and parse it into a CampaignConfig.
+class TopologyConfig(_Model):
+    includes: list[Path] = Field(
+        default_factory=lambda: [Path(name) for name in DEFAULT_INCLUDES],
+        description="Force-field ITPs included in every topology.",
+    )
 
-    Args:
-        config_file: Path to the YAML configuration file.
 
-    Returns:
-        Parsed CampaignConfig instance.
+def default_stages() -> list[StageConfig]:
+    """Minimization, equilibration and AWH solvation free energy."""
+    return [
+        StageConfig(name="min", mdp="min.mdp"),
+        StageConfig(name="eq", mdp="eq.mdp", maxwarn=2),
+        StageConfig(name="awh", mdp="awh.mdp", substitute={"TOCOUPLE": "{target}"}),
+    ]
+
+
+class CampaignConfig(_Model):
+    """A full simulation campaign."""
+
+    title: str = "Unnamed campaign"
+    output_dir: Path = Path("campaign")
+    forcefield_dir: Path = DEFAULT_FORCEFIELD_DIR
+    mdp_dir: Path = DEFAULT_MDP_DIR
+    topology: TopologyConfig = Field(default_factory=TopologyConfig)
+    molecules: dict[str, Path] = Field(
+        default_factory=dict, description="Target molecule name -> ITP file."
+    )
+    matrix: MatrixConfig
+    simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)
+    stages: list[StageConfig] = Field(default_factory=default_stages)
+
+    @model_validator(mode="after")
+    def _resolve_paths(self, info: ValidationInfo) -> "CampaignConfig":
+        base_dir = Path((info.context or {}).get("base_dir", Path.cwd()))
+        self.output_dir = _resolve(self.output_dir, base_dir)
+        self.forcefield_dir = _resolve(self.forcefield_dir, base_dir)
+        self.mdp_dir = _resolve(self.mdp_dir, base_dir)
+        self.topology.includes = [
+            _resolve(path, self.forcefield_dir) for path in self.topology.includes
+        ]
+        self.molecules = {
+            name: _resolve(path, base_dir) for name, path in self.molecules.items()
+        }
+        return self
+
+    @model_validator(mode="after")
+    def _check_stages(self) -> "CampaignConfig":
+        if not self.stages:
+            raise ValueError("at least one stage is required")
+        seen = [COORDINATES_STEP]
+        for stage in self.stages:
+            if stage.name in seen:
+                raise ValueError(f"duplicate stage name {stage.name!r}")
+            if stage.input is not None and stage.input not in seen:
+                raise ValueError(
+                    f"stage {stage.name!r}: input {stage.input!r} must be "
+                    f"{COORDINATES_STEP!r} or an earlier stage"
+                )
+            seen.append(stage.name)
+        return self
+
+    def mdp_path(self, stage: StageConfig) -> Path:
+        return _resolve(Path(stage.mdp), self.mdp_dir)
+
+
+def _resolve(path: Path, base_dir: Path) -> Path:
+    path = Path(path).expanduser()
+    return path if path.is_absolute() else (base_dir / path).resolve()
+
+
+def load_campaign(config_file: str | Path) -> CampaignConfig:
+    """Load and validate a campaign YAML file.
+
+    Raises:
+        ConfigError: If the file cannot be parsed or fails validation.
     """
-    yaml = YAML()
-    yaml.preserve_quotes = True
-
-    with open(config_file) as f:
-        data = yaml.load(f) or {}
-
-    # Parse simulations separately to handle potential list format
-    if "simulations" in data and isinstance(data["simulations"], list):
-        sim_configs = []
-        for sim_data in data["simulations"]:
-            if isinstance(sim_data, dict):
-                sim_configs.append(SimulationConfig(**sim_data))
-        data["simulations"] = sim_configs
-
-    return CampaignConfig(**data)
-
-
-def dump_config_to_yaml(config: CampaignConfig, output_file: str | Path) -> None:
-    """Dump a CampaignConfig to a YAML file.
-
-    Args:
-        config: The configuration to dump.
-        output_file: Path to the output YAML file.
-    """
-    import json
-
-    yaml = YAML()
-    yaml.preserve_quotes = True
-
-    with open(output_file, "w") as f:
-        # Convert to dict and write
-        config_dict = config.model_dump(exclude_none=True)
-
-        # Handle Path objects for JSON serialization
-        def serialize_value(val):
-            if isinstance(val, Path):
-                return str(val)
-            elif hasattr(val, "__dict__"):
-                return val.__dict__
-            else:
-                return val
-
-        config_dict = json.loads(json.dumps(config_dict, default=lambda o: str(o)))
-
-        yaml.dump(config_dict, f)
+    config_file = Path(config_file)
+    try:
+        data = YAML(typ="safe").load(config_file.read_text()) or {}
+    except Exception as exc:
+        raise ConfigError(f"cannot read {config_file}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{config_file}: top level must be a mapping")
+    try:
+        return CampaignConfig.model_validate(
+            data, context={"base_dir": config_file.resolve().parent}
+        )
+    except ValueError as exc:
+        raise ConfigError(f"{config_file}: {exc}") from exc

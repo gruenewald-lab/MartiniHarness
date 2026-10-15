@@ -1,4 +1,0 @@
-CGsmiles
-GromcsWrapper
-vermouth
-polyply
