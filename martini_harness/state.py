@@ -13,6 +13,10 @@ DONE = "done"
 FAILED = "failed"
 
 
+class StateError(RuntimeError):
+    """Raised when a state file cannot be read."""
+
+
 class StateFile:
     """Records which steps of a simulation finished, keyed by their inputs.
 
@@ -25,8 +29,14 @@ class StateFile:
         self.path = Path(workdir) / STATE_FILE_NAME
         self._steps: dict[str, dict[str, Any]] = {}
         if self.path.exists():
-            data = json.loads(self.path.read_text())
-            if data.get("version") == STATE_VERSION:
+            try:
+                data = json.loads(self.path.read_text())
+            except (OSError, ValueError) as exc:
+                raise StateError(
+                    f"cannot read state file {self.path} ({exc}); "
+                    "delete it to rerun this simulation from the start"
+                ) from exc
+            if isinstance(data, dict) and data.get("version") == STATE_VERSION:
                 self._steps = data.get("steps", {})
 
     def get(self, step: str) -> dict[str, Any] | None:

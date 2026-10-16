@@ -29,7 +29,7 @@ from .config import (
 from .library import LibraryError, MoleculeLibrary
 from .matrix import expand_matrix
 from .mdp import TemplateError, is_minimization, render_mdp, render_value
-from .state import DONE, FAILED, StateFile
+from .state import DONE, FAILED, StateError, StateFile
 from .topology import read_moleculetypes, render_topology
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,9 @@ STATUS_DONE = "done"
 STATUS_PENDING = "pending"
 STATUS_STALE = "stale"
 STATUS_FAILED = "failed"
+
+# SimulationOutcome.failed when a simulation fails outside of a step
+SETUP_FAILURE = "setup"
 
 
 @dataclass
@@ -107,7 +110,12 @@ class Simulation:
 
     def status(self) -> list[StepStatus]:
         """Report the status of every step without running anything."""
-        state = StateFile(self.spec.workdir)
+        try:
+            state = StateFile(self.spec.workdir)
+        except StateError as exc:
+            return [StepStatus(step.name, STATUS_FAILED, str(exc)) for step in self.steps[:1]] + [
+                StepStatus(step.name, STATUS_PENDING) for step in self.steps[1:]
+            ]
         statuses = []
         blocked = False
         for step in self.steps:
@@ -134,17 +142,23 @@ class Simulation:
             force: Rerun every step, ignoring the state file.
 
         Returns:
-            What ran, what was skipped and what failed. Exceptions raised by a
-            step are caught and reported in the outcome.
+            What ran, what was skipped and what failed. Errors are caught and
+            reported in the outcome rather than raised.
         """
-        workdir = self.spec.workdir
-        workdir.mkdir(parents=True, exist_ok=True)
-        (workdir / SPEC_FILE_NAME).write_text(
-            json.dumps(dataclasses.asdict(self.spec), indent=2, default=str)
-        )
-
-        state = StateFile(workdir)
         outcome = SimulationOutcome(self.name)
+        workdir = self.spec.workdir
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+            (workdir / SPEC_FILE_NAME).write_text(
+                json.dumps(dataclasses.asdict(self.spec), indent=2, default=str)
+            )
+            state = StateFile(workdir)
+        except (OSError, StateError) as exc:
+            logger.error("[%s] cannot prepare %s: %s", self.name, workdir, exc)
+            outcome.failed = SETUP_FAILURE
+            outcome.error = str(exc)
+            return outcome
+
         names = [step.name for step in self.steps]
         rerun = force
         for index, step in enumerate(self.steps):
@@ -162,7 +176,7 @@ class Simulation:
                 missing = [path.name for path in step.outputs if not path.exists()]
                 if missing:
                     raise BackendError(f"expected output(s) missing: {', '.join(missing)}")
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 logger.error("[%s] %s failed: %s", self.name, step.name, exc)
                 state.record(step.name, step.key, FAILED, str(exc))
                 outcome.failed = step.name
@@ -416,12 +430,24 @@ def run_campaign(
     backend: Backend | None = None,
     force: bool = False,
 ) -> list[SimulationOutcome]:
-    """Run simulations one after another; a failing simulation does not stop the rest."""
+    """Run simulations one after another.
+
+    A simulation that fails, for whatever reason, is reported in its outcome
+    and skipped; the loop continues with the next one. Only an interrupt
+    (Ctrl-C) stops the campaign.
+    """
     backend = backend or GromacsWrapperBackend()
     outcomes = []
     for index, simulation in enumerate(simulations, start=1):
         logger.info("(%d/%d) simulation %s", index, len(simulations), simulation.name)
-        outcomes.append(simulation.run(backend, force=force))
+        try:
+            outcome = simulation.run(backend, force=force)
+        except (Exception, SystemExit) as exc:
+            logger.exception("[%s] unexpected error, skipping", simulation.name)
+            outcome = SimulationOutcome(
+                simulation.name, failed=SETUP_FAILURE, error=f"{type(exc).__name__}: {exc}"
+            )
+        outcomes.append(outcome)
     return outcomes
 
 

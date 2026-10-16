@@ -256,8 +256,11 @@ its outputs still exist; once a step runs, every later step runs too. So
 editing a stage's MDP reruns that stage and everything after it, while
 changing `density` reruns everything from `coords` on.
 
-A failing step stops its simulation and is recorded in the state file
-(`status` shows the error); the campaign continues with the next simulation.
+A failing simulation is skipped and the campaign continues with the next
+one; only Ctrl-C stops the loop. A failed step is recorded in the state file
+(`status` shows the error) and is retried on the next `run`. Problems outside
+a step, such as an unreadable state file or a simulation directory that
+cannot be created, also skip only that simulation.
 `run` exits with code 1 if any simulation failed and 2 for configuration
 errors.
 
