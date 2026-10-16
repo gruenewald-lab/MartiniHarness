@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from martini_harness.config import load_campaign
 from martini_harness.simulation import build_simulations, run_campaign
 from martini_harness.state import STATE_FILE_NAME
@@ -173,3 +175,94 @@ def test_changing_global_mdrun_flags_does_not_rerun(campaign_file, fake_backend)
     path = campaign_file(BASIC_CAMPAIGN + "    mdrun: {ntomp: 16}\n")
     outcomes = run_campaign(_simulations(path), FakeBackend())
     assert all(o.ran == [] for o in outcomes)
+
+
+def _outcomes(outcomes):
+    return [(o.name, o.success, o.failed) for o in outcomes]
+
+
+def test_corrupt_state_file_skips_only_that_simulation(campaign_file, tmp_path, fake_backend):
+    path = campaign_file(BASIC_CAMPAIGN)
+    workdir = tmp_path / "out" / "row42_in_W"
+    workdir.mkdir(parents=True)
+    (workdir / STATE_FILE_NAME).write_text("{not json")
+
+    outcomes = run_campaign(_simulations(path), fake_backend)
+    assert _outcomes(outcomes) == [("row42_in_W", False, "setup"), ("row42_in_CLF", True, None)]
+    assert "cannot read state file" in outcomes[0].error
+
+    status = _simulations(path)[0].status()  # must not raise
+    assert status[0].status == "failed" and "cannot read state file" in status[0].error
+
+
+def test_unwritable_workdir_skips_only_that_simulation(campaign_file, tmp_path, fake_backend):
+    path = campaign_file(BASIC_CAMPAIGN)
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "row42_in_W").write_text("a file where the directory should be")
+
+    outcomes = run_campaign(_simulations(path), fake_backend)
+    assert _outcomes(outcomes) == [("row42_in_W", False, "setup"), ("row42_in_CLF", True, None)]
+
+
+def test_system_exit_in_a_step_is_recorded_and_skipped(campaign_file, tmp_path):
+    class ExitingBackend(FakeBackend):
+        def generate_coordinates(self, topology, output, density, name, log):
+            if name == "row42_in_W":
+                raise SystemExit("library gave up")
+            super().generate_coordinates(topology, output, density, name, log)
+
+    outcomes = run_campaign(_simulations(campaign_file(BASIC_CAMPAIGN)), ExitingBackend())
+    assert _outcomes(outcomes) == [("row42_in_W", False, "coords"), ("row42_in_CLF", True, None)]
+    state = json.loads((tmp_path / "out" / "row42_in_W" / STATE_FILE_NAME).read_text())
+    assert state["steps"]["coords"]["status"] == "failed"
+
+
+def test_unexpected_error_in_simulation_run_is_skipped(campaign_file, fake_backend, monkeypatch):
+    simulations = _simulations(campaign_file(BASIC_CAMPAIGN))
+
+    def broken_run(backend, force=False):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(simulations[0], "run", broken_run)
+    outcomes = run_campaign(simulations, fake_backend)
+    assert _outcomes(outcomes) == [("row42_in_W", False, "setup"), ("row42_in_CLF", True, None)]
+    assert outcomes[0].error == "RuntimeError: bug"
+
+
+def test_keyboard_interrupt_still_stops_the_campaign(campaign_file):
+    class Interrupt(FakeBackend):
+        def grompp(self, flags, log):
+            raise KeyboardInterrupt
+
+    backend = Interrupt()
+    with pytest.raises(KeyboardInterrupt):
+        run_campaign(_simulations(campaign_file(BASIC_CAMPAIGN)), backend)
+    assert [kind for kind, _ in backend.calls] == ["coords"]
+
+
+def test_bonded_gpu_is_dropped_for_single_bead_targets(campaign_file, tmp_path, fake_backend):
+    (tmp_path / "bead.itp").write_text("[ moleculetype ]\nbead 1\n[ atoms ]\n1 TC3 1 BED C1 1 0.0\n")
+    body = """
+    output_dir: out
+    molecules:
+      row42: row42.itp
+      bead: bead.itp
+    simulation: {n_solvent: 100}
+    mdrun: {bonded: gpu, ntomp: 4}
+    matrix:
+      target: [row42, bead, W]     # W: single bead from the force-field includes
+      solvent: [OCO]
+    """
+    simulations = _simulations(campaign_file(body))
+    assert {sim.name: sim.spec.target_atoms for sim in simulations} == {
+        "row42_in_OCO": 8, "bead_in_OCO": 1, "W_in_OCO": 1,
+    }
+    run_campaign(simulations, fake_backend)
+
+    mdruns = [flags for kind, flags in fake_backend.calls if kind == "mdrun"]
+    for flags in mdruns:
+        simulation, stage = flags["deffnm"].parent.name, flags["deffnm"].name
+        if stage == "min":
+            continue
+        assert flags["ntomp"] == 4
+        assert ("bonded" in flags) == (simulation == "row42_in_OCO"), (simulation, stage)

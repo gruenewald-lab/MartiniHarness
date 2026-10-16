@@ -191,6 +191,10 @@ MDP uses `integrator = steep`, `cg` or `l-bfgs`). A stage's own `mdrun`
 flags take precedence. Because these flags describe the machine rather than
 the simulation, changing them does not rerun finished steps.
 
+`bonded: gpu` is left out for simulations whose target molecule is a single
+bead, because mdrun refuses `-bonded gpu` when there are no bonded
+interactions to compute.
+
 ## Large molecule libraries
 
 A single ITP holding tens of thousands of molecules is too slow to read for
@@ -214,7 +218,16 @@ martini_harness sample library/ -n 500 --seed 1 -o campaigns/screen/targets.yaml
 ```
 
 The file sets `molecule_library` and the `target` axis of the matrix. Without
-`--seed` a random seed is chosen and recorded in the file. A campaign then
+`--seed` a random seed is chosen and recorded in the file.
+
+For names formatted `<length>_<molid>`, `--per-group K` replaces `-n` and
+draws exactly K molecules of every length (the group is the part of the name
+before the first `_`). Group sizes are logged, and sampling fails if a group
+has fewer than K molecules:
+
+```bash
+martini_harness sample library/ --per-group 50 --seed 1 -o campaigns/screen/targets.yaml
+``` A campaign then
 only adds what is missing:
 
 ```yaml
@@ -247,8 +260,11 @@ its outputs still exist; once a step runs, every later step runs too. So
 editing a stage's MDP reruns that stage and everything after it, while
 changing `density` reruns everything from `coords` on.
 
-A failing step stops its simulation and is recorded in the state file
-(`status` shows the error); the campaign continues with the next simulation.
+A failing simulation is skipped and the campaign continues with the next
+one; only Ctrl-C stops the loop. A failed step is recorded in the state file
+(`status` shows the error) and is retried on the next `run`. Problems outside
+a step, such as an unreadable state file or a simulation directory that
+cannot be created, also skip only that simulation.
 `run` exits with code 1 if any simulation failed and 2 for configuration
 errors.
 

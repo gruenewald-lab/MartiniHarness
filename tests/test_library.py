@@ -9,7 +9,9 @@ from martini_harness.library import (
     PREAMBLE_FILE_NAME,
     LibraryError,
     MoleculeLibrary,
+    group_of,
     sample_molecules,
+    sample_per_group,
     split_itp,
 )
 from martini_harness.simulation import build_simulations, run_campaign
@@ -172,3 +174,54 @@ def test_unknown_target_mentions_library(tmp_path):
     campaign.write_text("molecule_library: lib\nmatrix: {target: [mol2], solvent: [W]}\n")
     with pytest.raises(ConfigError, match="molecule library"):
         build_simulations(load_campaign(campaign))
+
+
+def _length_library(tmp_path, sizes):
+    """Library with names <length>_<molid>; sizes maps length -> number of molecules."""
+    source = tmp_path / "lengths.itp"
+    source.write_text(
+        "".join(
+            f"[ moleculetype ]\n{length}_{molid:04d} 1\n"
+            for length, count in sizes.items()
+            for molid in range(count)
+        )
+    )
+    split_itp(source, tmp_path / "lib")
+    return MoleculeLibrary(tmp_path / "lib")
+
+
+def test_group_of():
+    assert group_of("12_0345") == "12"
+    assert group_of("12_03_45") == "12"
+    with pytest.raises(LibraryError, match="no '_'"):
+        group_of("row42")
+
+
+def test_sample_per_group_draws_equal_counts(tmp_path):
+    lib = _length_library(tmp_path, {5: 50, 12: 200, 8: 20})
+    names, sizes = sample_per_group(lib, 10, seed=1)
+
+    assert sizes == {"5": 50, "8": 20, "12": 200}  # numeric order
+    counts = {}
+    for name in names:
+        counts[group_of(name)] = counts.get(group_of(name), 0) + 1
+    assert counts == {"5": 10, "8": 10, "12": 10}
+    assert names == [name for name in lib.names if name in set(names)]  # library order
+    assert names == sample_per_group(lib, 10, seed=1)[0]
+    assert names != sample_per_group(lib, 10, seed=2)[0]
+
+
+def test_sample_per_group_reports_small_groups(tmp_path):
+    lib = _length_library(tmp_path, {5: 50, 8: 3, 9: 1})
+    with pytest.raises(LibraryError, match=r"fewer than 4 molecules: 8 \(3\), 9 \(1\)"):
+        sample_per_group(lib, 4, seed=0)
+
+
+def test_sample_cli_per_group(tmp_path):
+    _length_library(tmp_path, {5: 30, 6: 30})
+    out = tmp_path / "targets.yaml"
+    assert cli.main(["sample", str(tmp_path / "lib"), "--per-group", "7", "--seed", "3", "-o", str(out)]) == 0
+    text = out.read_text()
+    assert "7 from each of 2 groups" in text
+    targets = [line.split('"')[1] for line in text.splitlines() if line.startswith("    - ")]
+    assert sorted(group_of(name) for name in targets) == ["5"] * 7 + ["6"] * 7
