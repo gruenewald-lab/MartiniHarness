@@ -46,15 +46,14 @@ lincs-iter               = 2
 
 free-energy 		 = yes		; turn on alchemistry 
 couple-lambda0 		 = none		; no non-bonded interactions at lambda=0
-couple-lambda1 		 = vdwq		; LJ + electrostatics on at lambda=1
+couple-lambda1 		 = vdw		; only LJ on at lambda=1 (charges off in both states)
 couple-moltype 		 = TOCOUPLE	; molecule whose interactions coupled to lambda
 couple-intramol 	 = no		; no decoupling of bonded terms
 			   		; thus lambda=0 corresponds to the molecule in vacuum
-init-lambda-state 	 = 30		; we start sampling at lambda index 30 (see below)
-			   		; the values below define the lambdas for the 30 windows
-					; LJ and electrostatics are decoupled separately
-vdw_lambdas              = 1   1   1   1   1   1   1   1   1   1 1 0.95 0.9 0.85 0.8 0.75 0.7 0.65 0.6 0.55 0.5 0.45 0.4 0.35 0.3 0.25 0.2 0.15 0.1 0.05 0
-coul_lambdas             = 1 0.9 0.8 0.7 0.6 0.5 0.4 0.3 0.2 0.1 0    0   0    0   0    0   0    0   0    0   0    0   0    0   0    0   0    0   0    0 0
+init-lambda-state 	 = 20		; we start sampling at lambda index 20 (see below)
+			   		; the values below define the lambdas for the 21 windows
+					; only LJ is decoupled
+vdw_lambdas              = 1 0.95 0.9 0.85 0.8 0.75 0.7 0.65 0.6 0.55 0.5 0.45 0.4 0.35 0.3 0.25 0.2 0.15 0.1 0.05 0
 calc-lambda-neighbors 	 = -1	     	; calculate energy differences to all neighbours 
 sc_alpha 		 = 0.5		; soft-core interactions to avoid overlap issues ...
 sc_sigma 		 = 0.3		; when the molecule is barely present ...
@@ -76,6 +75,6 @@ awh1-growth 		  = exp-linear	; we use the two-stage approach for convergence
 awh1-ndim 		  = 1		 
 awh1-dim1-coord-provider  = fep-lambda	; AWH uses alchemical reaction coordinate
 awh1-dim1-coord-index 	  = 1		
-awh1-dim1-start 	  = 0		; we sample lambdas from 0 to 30
-awh1-dim1-end 		  = 30
+awh1-dim1-start 	  = 0		; we sample lambdas from 0 to 20
+awh1-dim1-end 		  = 20
 awh1-dim1-diffusion 	  = 0.001	; sets the convergence together with awh1-error-init

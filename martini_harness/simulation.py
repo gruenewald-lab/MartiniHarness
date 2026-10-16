@@ -1,1011 +1,433 @@
-"""Simulation workflow management."""
+"""Turning a campaign into simulations and running them step by step.
 
+Every simulation consists of a fixed ``topology`` and ``coords`` step followed
+by the stages from the campaign file. Each step has a cache key derived from
+its inputs and the key of the step before it; a step is skipped when the state
+file says it finished with the same key and its outputs still exist. Once one
+step runs, all later steps run too.
+"""
+
+import dataclasses
+import hashlib
+import json
 import logging
-import os
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
-import gromacs as gmx
-import numpy as np
-from polyply.src.topology import Topology
-from polyply import gen_coords
-from vermouth.forcefield import ForceField
-
-from .config import CampaignConfig, SimulationConfig
+from .backend import Backend, BackendError, GromacsWrapperBackend
+from .config import (
+    COORDINATES_STEP,
+    TOPOLOGY_STEP,
+    CampaignConfig,
+    ConfigError,
+    SimulationDefaults,
+    StageConfig,
+    SAFE_NAME,
+)
+from .library import LibraryError, MoleculeLibrary
+from .matrix import expand_matrix
+from .mdp import TemplateError, is_minimization, render_mdp, render_value
+from .state import DONE, FAILED, StateFile
+from .topology import read_moleculetypes, render_topology
 
 logger = logging.getLogger(__name__)
 
+SPEC_FILE_NAME = "simulation.json"
 
-# Type alias for stage type classification
-StageType = str  # Can be one of: 'SETUP', 'COORDINATE_GENERATION', 'MINIMIZATION', 'EQUILIBRATION', 'AWH', 'PRODUCTION'
-
-STAGE_TYPE_MAPPING = {
-    "SETUP": "SETUP",
-    "COORDINATE_GENERATION": "COORDINATE_GENERATION", 
-    "MINIMIZATION": "MINIMIZATION",
-    "EQUILIBRATION": "EQUILIBRATION",
-    "AWH": "AWH",
-    "PRODUCTION": "PRODUCTION",  # General production stage (can be AWH or MD)
-}
-
-# Mapping from MDP filename to default stage type
-MDP_TO_STAGE_TYPE = {
-    "setup.mdp": "SETUP",
-    "coordinate_generation.mdp": "COORDINATE_GENERATION",
-    "min.mdp": "MINIMIZATION",
-    "eq.mdp": "EQUILIBRATION",
-    "awh.mdp": "AWH",
-    "prod.mdp": "PRODUCTION",
-}
-
-# Expected output files per stage type (relative paths from workdir)
-EXPECTED_FILES_PER_STAGE_TYPE = {
-    "SETUP": ["system.top"],
-    "COORDINATE_GENERATION": ["init.gro", "coords.gro"],
-    "MINIMIZATION": ["min.gro", "min.log", "min.cpt"],
-    "EQUILIBRATION": ["eq.gro", "eq.log", "eq.cpt"],
-    "AWH": ["awh.xvg", "awh.tpr"],
-    "PRODUCTION": ["prod.gro", "prod.log", "prod.cpt"],  # XPM is optional, xvg files common too
-}
-
-# Stage types that are checkpointable (can be restarted)
-CHECKPOINTABLE_STAGE_TYPES = {"MINIMIZATION", "EQUILIBRATION", "AWH", "PRODUCTION"}
-
-
-def get_stage_type_from_mdp_filename(mdp_filename: str) -> str:
-    """Determine stage type from MDP filename.
-    
-    Args:
-        mdp_filename: Name of the MDP file (e.g., 'min.mdp', 'prod.mdp')
-        
-    Returns:
-        Stage type string (SETUP, COORDINATE_GENERATION, MINIMIZATION, etc.)
-    """
-    # Extract base name without .mdp extension
-    base_name = mdp_filename.lower()
-    if not base_name.endswith(".mdp"):
-        base_name += ".mdp"
-    
-    return MDP_TO_STAGE_TYPE.get(base_name, "PRODUCTION")
-
-
-def get_expected_output_files(stage_type: str) -> list[str]:
-    """Get expected output files for a given stage type.
-    
-    Args:
-        stage_type: The stage type (SETUP, MINIMIZATION, EQUILIBRATION, etc.)
-        
-    Returns:
-        List of expected output file names (relative paths from workdir)
-    """
-    return EXPECTED_FILES_PER_STAGE_TYPE.get(stage_type, [])
-
-
-def check_files_exist(workdir: Path, file_patterns: list[str]) -> list[Path]:
-    """Check if files exist in a directory, supporting wildcard patterns.
-    
-    Args:
-        workdir: Working directory to search in
-        file_patterns: List of file patterns (e.g., ['prod.gro', '*.xvg'])
-        
-    Returns:
-        List of Path objects for found files
-    """
-    import glob as glob_module
-    
-    found_files = []
-    for pattern in file_patterns:
-        if "*" in pattern or "?" in pattern:
-            # Handle wildcard patterns using glob
-            full_pattern = workdir / pattern
-            matches = list(workdir.glob(pattern))
-            found_files.extend(matches)
-        else:
-            # Exact file name
-            file_path = workdir / pattern
-            if file_path.exists():
-                found_files.append(file_path)
-    
-    return found_files
-
-
-def check_stage_complete_by_type(workdir: Path, stage_config: dict) -> bool:
-    """Check if a simulation stage is complete by examining expected output files.
-    
-    Supports wildcard patterns for PRODUCTION stages which may generate multiple xvg files.
-    
-    Args:
-        workdir: Working directory path (absolute).
-        stage_config: Dictionary containing stage configuration with keys:
-            - stage_type: One of SETUP, COORDINATE_GENERATION, MINIMIZATION, EQUILIBRATION, AWH, PRODUCTION
-            - output_prefix: Optional prefix for stage-specific files (e.g., "prod" for prod.gro)
-            
-    Returns:
-        True if the stage appears to be complete, False otherwise.
-    """
-    import os
-    
-    stage_type = stage_config.get("stage_type", "PRODUCTION")
-    output_prefix = stage_config.get("output_prefix", "")
-    
-    # Get expected files for this stage type
-    expected_files = get_expected_output_files(stage_type)
-    
-    if not expected_files:
-        logger.warning(f"Unknown stage type {stage_type}, cannot verify completion")
-        return False
-    
-    # Adjust file names based on output_prefix if provided
-    adjusted_files = []
-    for fname in expected_files:
-        # Replace common prefixes with custom prefix where applicable
-        if output_prefix and ("prod" in fname or "awh" in fname or "eq" in fname or "min" in fname):
-            # Replace the stage-specific prefix with provided one
-            import re
-            adjusted = re.sub(r'^(prod|awh|eq|min)\.', f'{output_prefix}.', fname)
-            adjusted_files.append(adjusted)
-        else:
-            adjusted_files.append(fname)
-    
-    # Check if all expected files exist (with wildcard support for PRODUCTION stages)
-    found_files = check_files_exist(workdir, adjusted_files)
-    
-    # For checkpointable stages, we need most critical files; for setup/coord_gen, strict check
-    is_checkpointable = stage_type in CHECKPOINTABLE_STAGE_TYPES
-    
-    if len(found_files) == len(adjusted_files):
-        return True  # All files found
-    elif is_checkpointable and len(found_files) >= int(len(adjusted_files) * 0.75):
-        # For checkpointable stages, partial completion counts (need ~75%)
-        logger.debug(f"Stage {stage_type}: Found {len(found_files)}/{len(adjusted_files)} expected files")
-        return True
-    
-    logger.debug(f"Stage {stage_type}: Only found {len(found_files)}/{len(adjusted_files)} expected files")
-    return False
-
-
-class SimulationStage(Enum):
-    """Enumeration of simulation stages (deprecated, kept for backward compatibility)."""
-
-    SETUP = "setup"
-    COORDINATE_GENERATION = "coordinate_generation"
-    MINIMIZATION = "minimization"
-    EQUILIBRATION = "equilibration"
-    AWH = "awh"
-    MD_PRODUCTION = "md_production"
+# Step statuses reported by Simulation.status()
+STATUS_DONE = "done"
+STATUS_PENDING = "pending"
+STATUS_STALE = "stale"
+STATUS_FAILED = "failed"
 
 
 @dataclass
-class SimulationResult:
-    """Result of a simulation stage.
+class SimulationSpec:
+    """One fully resolved matrix combination."""
 
-    Attributes:
-        stage: The simulation stage that was completed.
-        success: Whether the stage completed successfully.
-        message: Human-readable status message.
-        output_files: List of output files generated.
-        errors: Any errors encountered during execution.
-    """
-
-    stage: SimulationStage
-    success: bool = False
-    message: str = ""
-    output_files: list[Path] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    name: str
+    target: str
+    solvent: str
+    n_target: int
+    n_solvent: int
+    density: float
+    includes: list[Path]
+    workdir: Path
+    variables: dict[str, Any] = field(default_factory=dict)
 
 
-class CoordinateGenerator:
-    """Generate simulation coordinates using Polyply.
+@dataclass
+class Step:
+    name: str
+    signature: dict[str, Any]
+    outputs: list[Path]
+    action: Callable[[Backend], None]
+    key: str = ""
 
-    Attributes:
-        top_path: Path to the topology file.
-    """
 
-    def __init__(self, top_path: str | Path):
-        self.top_path = Path(top_path)
+@dataclass
+class StepStatus:
+    name: str
+    status: str
+    error: str | None = None
 
-    def generate(
-        self,
-        output_name: str = "init.gro",
-        density: float = 900.0,
-        name: str = "coords",
-    ) -> Path:
-        """Generate initial coordinates.
+
+@dataclass
+class SimulationOutcome:
+    name: str
+    ran: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
+    failed: str | None = None
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.failed is None
+
+
+class Simulation:
+    """A single simulation: its spec plus the ordered steps that produce it."""
+
+    def __init__(self, spec: SimulationSpec, config: CampaignConfig):
+        self.spec = spec
+        self.steps = plan_steps(spec, config)
+        key = ""
+        for step in self.steps:
+            key = _hash({"step": step.name, "signature": step.signature, "upstream": key})
+            step.key = key
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+    def _is_done(self, state: StateFile, step: Step) -> bool:
+        return state.is_done(step.name, step.key) and all(path.exists() for path in step.outputs)
+
+    def status(self) -> list[StepStatus]:
+        """Report the status of every step without running anything."""
+        state = StateFile(self.spec.workdir)
+        statuses = []
+        blocked = False
+        for step in self.steps:
+            entry = state.get(step.name)
+            if blocked:
+                statuses.append(StepStatus(step.name, STATUS_PENDING))
+            elif self._is_done(state, step):
+                statuses.append(StepStatus(step.name, STATUS_DONE))
+            else:
+                blocked = True
+                if entry is None:
+                    statuses.append(StepStatus(step.name, STATUS_PENDING))
+                elif entry["status"] == FAILED:
+                    statuses.append(StepStatus(step.name, STATUS_FAILED, entry.get("error")))
+                else:
+                    statuses.append(StepStatus(step.name, STATUS_STALE))
+        return statuses
+
+    def run(self, backend: Backend, force: bool = False) -> SimulationOutcome:
+        """Run all steps that are not done yet.
 
         Args:
-            output_name: Name of the output .gro file (relative to workdir).
-            density: Target density in kg/m³.
-            name: Name for the generated structure.
+            backend: Backend that executes polyply and GROMACS.
+            force: Rerun every step, ignoring the state file.
 
         Returns:
-            Path object pointing to the generated coordinate file (relative to workdir).
+            What ran, what was skipped and what failed. Exceptions raised by a
+            step are caught and reported in the outcome.
         """
-        logger.info("Generating coordinates with Polyply (density=%.1f kg/m³)", density)
-
-        gen_coords(
-            toppath=str(self.top_path), outpath=output_name, density=density, name=name
+        workdir = self.spec.workdir
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / SPEC_FILE_NAME).write_text(
+            json.dumps(dataclasses.asdict(self.spec), indent=2, default=str)
         )
-        return Path(output_name)
+
+        state = StateFile(workdir)
+        outcome = SimulationOutcome(self.name)
+        names = [step.name for step in self.steps]
+        rerun = force
+        for index, step in enumerate(self.steps):
+            if not rerun and self._is_done(state, step):
+                outcome.skipped.append(step.name)
+                continue
+            rerun = True
+            state.discard(names[index:])
+            for path in step.outputs:
+                path.unlink(missing_ok=True)
+
+            logger.info("[%s] running %s", self.name, step.name)
+            try:
+                step.action(backend)
+                missing = [path.name for path in step.outputs if not path.exists()]
+                if missing:
+                    raise BackendError(f"expected output(s) missing: {', '.join(missing)}")
+            except Exception as exc:
+                logger.error("[%s] %s failed: %s", self.name, step.name, exc)
+                state.record(step.name, step.key, FAILED, str(exc))
+                outcome.failed = step.name
+                outcome.error = str(exc)
+                return outcome
+            state.record(step.name, step.key, DONE)
+            outcome.ran.append(step.name)
+        return outcome
 
 
-def write_topology(
-    solvent: str,
-    target: str,
-    n_target: int,
-    n_solvent: int,
-    forcefield_itp: Path,
-    solvent_itp: Path | None = None,
-    molecule_itp_dir: Path | None = None,
-    output_file: str | Path | None = None,
-) -> Path:
-    """Write a simulation topology file.
+def plan_steps(spec: SimulationSpec, config: CampaignConfig) -> list[Step]:
+    """Build the ordered steps of a simulation.
 
-    Args:
-        solvent: Solvent name/identifier.
-        target: Target molecule name/identifier.
-        n_target: Number of target molecules.
-        n_solvent: Number of solvent molecules.
-        forcefield_itp: Path to the force field ITP file.
-        solvent_itp: Optional path to solvent-specific ITP file.
-        molecule_itp_dir: Path to molecule definition ITP directory/file.
-        output_file: Output topology file path (default: system.top).
-
-    Returns:
-        Path to the written topology file.
+    Raises:
+        ConfigError: If an MDP template is missing or a template fails to render.
     """
-    from martini_harness import get_package_data_path
+    workdir = spec.workdir
+    top_file = workdir / "system.top"
+    coords_file = workdir / "init.gro"
 
-    lines = [f'#include "{forcefield_itp}"']
+    top_text = render_topology(
+        spec.includes,
+        spec.name,
+        [(spec.target, spec.n_target), (spec.solvent, spec.n_solvent)],
+    )
 
-    if solvent_itp:
-        lines.append(f'#include "{solvent_itp}"')
+    def write_topology(backend: Backend) -> None:
+        top_file.write_text(top_text)
 
-    # Get molecule directory or use default location
-    mol_dir = molecule_itp_dir
-    if not mol_dir:
-        from martini_harness import get_package_data_path
-        mol_dir = get_package_data_path("row42.itp")
+    def generate_coordinates(backend: Backend) -> None:
+        backend.generate_coordinates(
+            top_file, coords_file, spec.density, spec.name, workdir / "coords.log"
+        )
 
-    lines.append(f'#include "{mol_dir}"')
-
-    # Add system and molecules sections
-    lines += [
-        "",
-        "[ system ]",
-        f"{target}_in_{solvent}",
-        "",
-        "[ molecules ]",
-        f"{target}  {n_target}",
-        f"{solvent}  {n_solvent}",
+    steps = [
+        Step(
+            TOPOLOGY_STEP,
+            {"topology": top_text, "includes": {str(p): _file_hash(p) for p in spec.includes}},
+            [top_file],
+            write_topology,
+        ),
+        Step(COORDINATES_STEP, {"density": spec.density}, [coords_file], generate_coordinates),
     ]
 
-    output_file = Path(output_file or "system.top")
-    output_file.write_text("\n".join(lines))
-    return output_file
-
-
-class SimulationRunner:
-    """Run GROMACS simulation steps.
-
-    Attributes:
-        workdir: Working directory for this simulation.
-        forcefield_itp: Force field ITP file path.
-        solvent_itp: Solvent ITP file path (optional).
-        molecule_itp_dir: Molecule definition directory/file.
-    """
-
-    def __init__(
-        self,
-        workdir: str | Path,
-        forcefield_itp: Path,
-        solvent_itp: Path | None = None,
-        molecule_itp_dir: Path | None = None,
-    ):
-        self.workdir = Path(workdir)
-        self.forcefield_itp = forcefield_itp
-        self.solvent_itp = solvent_itp
-        self.molecule_itp_dir = molecule_itp_dir
-
-        # Ensure work directory exists
-        self.workdir.mkdir(parents=True, exist_ok=True)
-
-    @contextmanager
-    def _working_directory(self):
-        """Context manager to temporarily change into the simulation workdir."""
-        original_cwd = os.getcwd()
-        try:
-            os.chdir(self.workdir)
-            yield
-        finally:
-            os.chdir(original_cwd)
-
-    def run_grompp(
-        self,
-        mdp_file: str | Path,
-        structure: str | Path,
-        topology: str | Path,
-        output_prefix: str | Path,
-        maxwarn: int = 4,
-        extra_args: dict[str, Any] | None = None,
-    ) -> Path:
-        """Run GROMACS grompp to create a TPR file.
-
-        Args:
-            mdp_file: Path to the MDP parameter file.
-            structure: Input structure file (e.g., .gro).
-            topology: Topology file (.top).
-            output_prefix: Output prefix for the TPR file.
-            maxwarn: Maximum number of GROMACS warnings to ignore.
-            extra_args: Extra arguments for grompp.
-
-        Returns:
-            Path to the generated TPR file.
-        """
-        mdp_file = Path(mdp_file)
-        structure = Path(structure)
-        topology = Path(topology)
-        output_prefix = Path(output_prefix)
-
-        logger.info("Running grompp with MDP: %s", mdp_file.name)
-
-        args = {
-            "f": mdp_file,
-            "c": structure,
-            "p": topology,
-            "o": f"{output_prefix}.tpr",
-            "maxwarn": maxwarn,
-            **(extra_args or {}),
-        }
-
-        gmx.grompp(**args)
-
-        return Path(f"{output_prefix}.tpr")
-
-    def run_mdrun(
-        self,
-        tpr_file: str | Path,
-        output_prefix: str | Path,
-        extra_args: dict[str, Any] | None = None,
-    ) -> list[Path]:
-        """Run GROMACS mdrun to execute a simulation.
-
-        Args:
-            tpr_file: Input TPR file.
-            output_prefix: Output prefix (without extension).
-            extra_args: Extra arguments for mdrun.
-
-        Returns:
-            List of generated output files.
-        """
-        tpr_file = Path(tpr_file)
-        output_prefix = Path(output_prefix)
-
-        logger.info("Running mdrun with TPR: %s", tpr_file.name)
-
-        args = {"s": tpr_file, "deffnm": output_prefix}
-
-        if extra_args:
-            args.update(extra_args)
-
-        # Add verbose mode by default
-        args.setdefault("v", True)
-
-        gmx.mdrun(**args)
-
-        # Return common output files (relative paths from workdir)
-        output_files = [
-            Path(f"{output_prefix}.gro"),
-            Path(f"{output_prefix}.log"),
-            Path(f"{output_prefix}.ener"),
-            Path(f"{output_prefix}.trr"),
-        ]
-        return [f for f in output_files if f.exists()]
-
-    def run_stage(
-        self,
-        stage: SimulationStage,
-        mdp_file: str | Path,
-        structure: str | Path,
-        topology: str | Path,
-        output_prefix: str | None = None,
-        maxwarn: int = 4,
-        extra_args: dict[str, Any] | None = None,
-    ) -> SimulationResult:
-        """Run a complete simulation stage (grompp + mdrun).
-
-        Args:
-            stage: The simulation stage enum.
-            mdp_file: Path to MDP file.
-            structure: Input structure file.
-            topology: Topology file.
-            output_prefix: Output prefix for files.
-            maxwarn: Maximum GROMACS warnings to ignore.
-            extra_args: Extra arguments for both grompp and mdrun.
-
-        Returns:
-            SimulationResult with status information.
-        """
-        output_prefix = output_prefix or stage.value
-
-        try:
-            # Run grompp
-            tpr_file = self.run_grompp(
-                mdp_file=mdp_file,
-                structure=structure,
-                topology=topology,
-                output_prefix=output_prefix,
-                maxwarn=maxwarn,
-                extra_args=extra_args,
-            )
-
-            # Run mdrun
-            outputs = self.run_mdrun(tpr_file=tpr_file, output_prefix=output_prefix)
-
-            logger.info(
-                "Stage %s completed successfully. Output files: %s",
-                stage.value,
-                [f.name for f in outputs],
-            )
-
-            return SimulationResult(
-                stage=stage, success=True, message="Completed successfully"
-            )
-
-        except Exception as e:
-            error_msg = f"{stage.value} failed: {e}"
-            logger.warning(error_msg)
-            return SimulationResult(stage=stage, success=False, message=str(e))
-
-
-class SimulationCampaign:
-    """Manage a complete simulation campaign with multiple configurations.
-
-    Attributes:
-        config: The campaign configuration.
-        campaign_dir: Base directory for all outputs.
-    """
-
-    def __init__(self, config: CampaignConfig):
-        self.config = config
-        self.campaign_dir = Path(config.output_base) / config.title.replace(" ", "_")
-
-        # Ensure campaign directory exists
-        self.campaign_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info(
-            "Campaign '%s' initialized. Output will be in: %s",
-            self.config.title,
-            self.campaign_dir,
-        )
-
-    def run_simulation(self, sim_config: SimulationConfig) -> list[SimulationResult]:
-        """Run a single simulation with all stages.
-
-        Args:
-            sim_config: Configuration for the specific simulation.
-
-        Returns:
-            List of results from each simulation stage.
-        """
-        logger.info("Running simulation: %s", sim_config.name)
-
-        # Create work directory for this simulation
-        workdir = self.campaign_dir / sim_config.name
-        workdir.mkdir(parents=True, exist_ok=True)
-
-        # Initialize components
-        gmx_files_dir = self.config.get_gmx_files_dir()
-        mdp_dir = self.config.get_mdp_dir()
-
-        runner = SimulationRunner(
-            workdir=workdir,
-            forcefield_itp=gmx_files_dir / "martini_v3.0.0.itp",
-            solvent_itp=gmx_files_dir / "martini_v3.0.0_solvents_v1.itp",
-            molecule_itp_dir=None,  # Will be handled separately
-        )
-
-        results: list[SimulationResult] = []
-
-        try:
-            # Write topology file
-            top_file = write_topology(
-                solvent=sim_config.solvent,
-                target=sim_config.target_molecule,
-                n_target=sim_config.n_target,
-                n_solvent=sim_config.n_solvent,
-                forcefield_itp=runner.forcefield_itp,
-                solvent_itp=runner.solvent_itp,
-            )
-
-            # Coordinate generation stage
-            logger.info("Generating initial coordinates")
-            coords_file = CoordinateGenerator(str(top_file)).generate(
-                output_path=workdir / "init.gro",
-                density=sim_config.density,
-                name="coords",
-            )
-
-            results.append(SimulationResult(stage=SimulationStage.COORDINATE_GENERATION))
-
-            # Minimization
-            min_mdp = mdp_dir / "min.mdp"
-
-            results.append(
-                runner.run_stage(
-                    stage=SimulationStage.MINIMIZATION,
-                    mdp_file=min_mdp,
-                    structure=workdir / "init.gro",
-                    topology=top_file,
-                    output_prefix="min",
-                    maxwarn=4,
-                )
-            )
-
-            # Check if minimization was successful
-            min_gro = workdir / "min.gro"
-            if not min_gro.exists():
-                logger.warning("min.gro not found, falling back to init.gro")
-                min_gro = workdir / "init.gro"
-
-            # Equilibration
-            eq_mdp = mdp_dir / "eq.mdp"
-            results.append(
-                runner.run_stage(
-                    stage=SimulationStage.EQUILIBRATION,
-                    mdp_file=eq_mdp,
-                    structure=min_gro,
-                    topology=top_file,
-                    output_prefix="eq",
-                    maxwarn=4,
-                    extra_args={"pforce": sim_config.pforce},
-                )
-            )
-
-            # Check if equilibration was successful
-            eq_gro = workdir / "eq.gro"
-            if not eq_gro.exists():
-                raise IOError("Equilibration failed: eq.gro not found")
-
-            # AWH (Adaptive Biasing Force) simulation
-            awh_mdp_src = mdp_dir / "awh.mdp"
-            awh_mdp_dst = workdir / "awh.mdp"
-
-            with open(awh_mdp_src, "r") as f:
-                awh_content = f.read()
-
-            # Replace TOCOUPLE placeholder with target molecule name
-            awh_content = awh_content.replace("TOCOUPLE", sim_config.target_molecule)
-
-            with open(awh_mdp_dst, "w") as f:
-                f.write(awh_content)
-
-            results.append(
-                runner.run_stage(
-                    stage=SimulationStage.AWH,
-                    mdp_file=awh_mdp_dst,
-                    structure=eq_gro,
-                    topology=top_file,
-                    output_prefix="awh",
-                    maxwarn=4,
-                    extra_args={"pforce": sim_config.pforce},
-                )
-            )
-
-        except Exception as e:
-            logger.error("Simulation failed for %s: %s", sim_config.name, e)
-            raise
-
-        finally:
-            # Clean up temporary AWH MDP file if it exists
-            awh_mdp_dst = workdir / "awh.mdp"
-            if awh_mdp_dst.exists():
-                try:
-                    awh_mdp_dst.unlink()
-                except OSError as e:
-                    logger.warning("Could not remove %s: %s", awh_mdp_dst, e)
-
-        return results
-
-    def run_all(self) -> list[SimulationResult]:
-        """Run all simulations in the campaign.
-
-        Returns:
-            List of results from all simulation runs.
-        """
-        logger.info("Starting campaign '%s' with %d simulations", self.config.title, len(self.config.simulations))
-
-        all_results: list[SimulationResult] = []
-
-        for sim_config in self.config.simulations:
-            logger.info("\n%s Running simulation: %s", "=" * 50, sim_config.name)
-            results = self.run_simulation(sim_config)
-            all_results.extend(results)
-
-            # Log summary
-            success_count = sum(1 for r in results if r.success)
-            total_count = len(results)
-            logger.info("Completed %s/%d stages", success_count, total_count)
-
-        return all_results
-
-
-def run_simulation_workflow(
-    target: str,
-    solvent: str,
-    n_target: int = 1,
-    n_solvent: int = 8000,
-    density: float = 900.0,
-    pforce: float = 800_000.0,
-    workdir: Path | None = None,
-    gmx_files_dir: Path | None = None,
-    mdp_directory: Path | None = None,
-    stop_after: SimulationStage | None = None,
-) -> list[SimulationResult]:
-    """Run a complete simulation workflow for a target-solvent pair.
-
-    This is the main entry point for running simulations from scripts or CLI.
-
-    Args:
-        target: Target molecule name/identifier.
-        solvent: Solvent type (e.g., "OCO", "W", "CLF").
-        n_target: Number of target molecules.
-        n_solvent: Number of solvent molecules.
-        density: Target density in kg/m³.
-        pforce: Positional restraint force constant.
-        workdir: Working directory (default: current directory / "{target}_in_{solvent}").
-        gmx_files_dir: Directory containing GROMACS files.
-        mdp_directory: Directory containing MDP files.
-        stop_after: Optional stage to run up to (inclusive). If specified, the workflow
-            will complete this stage and then return without running subsequent stages.
-
-    Returns:
-        List of SimulationResult objects for each stage.
-    
-    Checkpoints: Automatically checks for existing workdir and completed stages,
-    skipping already finished steps to allow restart from previous state.
-    
-    Early Exit: If stop_after is specified (e.g., SimulationStage.AWH), the workflow will
-        run through that stage and then return without running MD_PRODUCTION or later stages.
-    """
-
-
-def check_simulated_stage(workdir: Path, stage: SimulationStage) -> bool:
-    """Check if a simulation stage has been completed by verifying expected output files.
-
-    Args:
-        workdir: Working directory path (absolute).
-        stage: The simulation stage to check.
-
-    Returns:
-        True if the stage appears to be complete, False otherwise.
-    """
-    import os
-    
-    # Map stages to their expected output files (relative paths from workdir)
-    expected_files = {
-        SimulationStage.SETUP: ["system.top"],
-        SimulationStage.COORDINATE_GENERATION: ["init.gro", "coords.gro"],
-        SimulationStage.MINIMIZATION: ["min.gro", "min.log", "min.cpt"],
-        SimulationStage.EQUILIBRATION: ["eq.gro", "eq.log", "eq.cpt"],
-        SimulationStage.AWH: ["awh.xvg", "awh.tpr"],
-        SimulationStage.MD_PRODUCTION: ["prod.gro", "prod.log", "prod.cpt"],  # XPM is optional
-    }
-    
-    expected = expected_files.get(stage)
-    if not expected:
-        logger.warning(f"Unknown stage {stage.name}, cannot verify completion")
-        return False
-    
-    # Check all required files exist
-    missing = []
-    for file_pattern in expected:
-        if (workdir / file_pattern).exists():
-            continue
-        else:
-            missing.append(file_pattern)
-    
-    if missing:
-        logger.debug(f"Stage {stage.value} incomplete - missing: {', '.join(missing)}")
-        return False
-    
-    logger.info(f"Stage {stage.value} appears to be complete")
-    return True
-
-
-def check_complete_simulation(workdir: Path) -> list[SimulationResult]:
-    """Check which simulation stages are already complete.
-
-    Args:
-        workdir: Working directory path (absolute).
-
-    Returns:
-        List of SimulationResult objects for all completed stages.
-    """
-    import os
-    
-    # Check if workdir exists at all
-    if not workdir.exists():
-        logger.info(f"Working directory {workdir} does not exist, starting fresh")
-        return []
-    
-    if not workdir.is_dir():
-        raise ValueError(f"Expected {workdir} to be a directory, but it is not")
-    
-    # Check each stage and collect completed ones
-    completed = []
-    
-    for stage in SimulationStage:
-        if check_simulated_stage(workdir, stage):
-            completed.append(SimulationResult(stage=stage, success=True))
-        else:
-            logger.info(f"Stage {stage.value} not yet complete")
-            break  # Stop checking as soon as we find an incomplete stage
-    
-    return completed
-
-
-def run_simulation_workflow(
-    target: str,
-    solvent: str,
-    n_target: int = 1,
-    n_solvent: int = 8000,
-    density: float = 900.0,
-    pforce: float = 800_000.0,
-    workdir: Path | None = None,
-    gmx_files_dir: Path | None = None,
-    mdp_directory: Path | None = None,
-) -> list[SimulationResult]:
-    # Import here to avoid circular imports
-    from martini_harness import get_package_data_path
-
-    workdir = workdir or Path(f"{target}_in_{solvent}")
-    
-    # Ensure workdir is absolute so we can use it in _working_directory context manager
-    if not workdir.is_absolute():
-        workdir = Path(".").resolve() / workdir
-    
-    logger.info(f"Working directory: {workdir}")
-    
-    # Check for existing simulation state and collect completed stages
-    completed_stages = check_complete_simulation(workdir)
-    
-    if completed_stages:
-        logger.info(f"Found {len(completed_stages)} completed stage(s)")
-        all_done = any(stage == SimulationStage.MD_PRODUCTION for stage in [r.stage for r in completed_stages])
-        
-        if all_done:
-            # All stages complete - return existing results without re-running
-            logger.info("All simulation stages already completed. Returning existing results.")
-            
-            # Create fresh result objects pointing to the workdir
-            final_results = []
-            for result in completed_stages:
-                final_results.append(SimulationResult(stage=result.stage, success=True))
-            
-            return final_results
-        else:
-            # Partial completion - will continue from where it left off
-            incomplete_stage = next((stage for stage in SimulationStage if not check_simulated_stage(workdir, stage)), None)
-            if incomplete_stage:
-                logger.info(f"Resuming from incomplete stage: {incomplete_stage.value}")
-    
-    gmx_files_dir = gmx_files_dir or get_package_data_path("gmx_files")
-    mdp_directory = mdp_directory or get_package_data_path("mdp_files")
-
-    # Create campaign config for this single simulation - use empty string as title 
-    # to avoid nested directory structure, workdir itself becomes the campaign dir
-    sim_config = SimulationConfig(
-        name=f"{target}_in_{solvent}",
-        target_molecule=target,
-        solvent=solvent,
-        n_target=n_target,
-        n_solvent=n_solvent,
-        density=density,
-        pforce=pforce,
-    )
-
-    campaign_config = CampaignConfig(
-        title="",  # Empty to avoid nested directory structure - we use workdir directly
-        output_base=Path("."),
-        simulations=[sim_config],
-        gromacs_path=str(gmx_files_dir),
-        mdp_directory=str(mdp_directory),
-    )
-
-    campaign = SimulationCampaign(campaign_config)
-    
-    # Run simulation within the workdir context manager to change CWD and reset afterwards
-    from martini_harness.simulation import SimulationRunner
-    
-    runner = SimulationRunner(
-        workdir=workdir,
-        forcefield_itp=gmx_files_dir / "martini_v3.0.0.itp",
-        solvent_itp=gmx_files_dir / "martini_v3.0.0_solvents_v1.itp",
-        molecule_itp_dir=None,  # Will be handled separately in write_topology
-    )
-    
-    results: list[SimulationResult] = []
-
+    structures = {COORDINATES_STEP: coords_file}
+    previous = COORDINATES_STEP
+    for stage in config.stages:
+        steps.append(_stage_step(stage, spec, config, top_file, structures, previous))
+        structures[stage.name] = workdir / f"{stage.name}.gro"
+        previous = stage.name
+    return steps
+
+
+def _stage_step(
+    stage: StageConfig,
+    spec: SimulationSpec,
+    config: CampaignConfig,
+    top_file: Path,
+    structures: dict[str, Path],
+    previous: str,
+) -> Step:
+    workdir = spec.workdir
+    mdp_template = config.mdp_path(stage)
+    if not mdp_template.is_file():
+        raise ConfigError(f"stage {stage.name!r}: MDP file not found: {mdp_template}")
     try:
-        with runner._working_directory():
-            # All paths here should use relative paths since we're now in workdir
-            mdp_dir = Path(mdp_directory)
-            
-            # Check if SETUP stage is already complete before writing topology
-            if check_simulated_stage(workdir, SimulationStage.SETUP):
-                logger.info("SETUP stage already complete, skipping")
-                # Find existing .top file in workdir
-                top_file = next(Path(".").glob("*.top"), None)
-                if not top_file:
-                    raise FileNotFoundError("No topology file found for SETUP stage")
-            else:
-                # Write topology file (uses absolute paths for library files, outputs to local dir)
-                top_file = write_topology(
-                    solvent=sim_config.solvent,
-                    target=sim_config.target_molecule,
-                    n_target=sim_config.n_target,
-                    n_solvent=sim_config.n_solvent,
-                    forcefield_itp=runner.forcefield_itp,
-                    solvent_itp=runner.solvent_itp,
-                )
+        mdp_text = render_mdp(
+            mdp_template.read_text(),
+            substitute=render_value(stage.substitute, spec.variables),
+            params=render_value(stage.mdp_params, spec.variables),
+        )
+        grompp_flags = render_value(stage.grompp, spec.variables)
+        mdrun_flags = render_value(stage.mdrun, spec.variables)
+        # Campaign-wide mdrun flags (threads, GPU offload) are about the
+        # machine, not the result, so they stay out of the step signature.
+        global_mdrun_flags = (
+            {} if is_minimization(mdp_text) else render_value(config.mdrun, spec.variables)
+        )
+    except TemplateError as exc:
+        raise ConfigError(f"stage {stage.name!r}: {exc}") from exc
 
-            # Check if coordinate generation is complete before running it
-            if not check_simulated_stage(workdir, SimulationStage.COORDINATE_GENERATION):
-                logger.info("Generating initial coordinates")
-                coords_gen = CoordinateGenerator(top_file)
-                coords_file = coords_gen.generate(
-                    output_name="init.gro",
-                    density=sim_config.density,
-                    name="coords",
-                )
+    input_step = stage.input or previous
+    input_structure = structures[input_step]
+    mdp_file = workdir / f"{stage.name}.mdp"
+    tpr_file = workdir / f"{stage.name}.tpr"
 
-            results.append(SimulationResult(stage=SimulationStage.COORDINATE_GENERATION))
+    def run_stage(backend: Backend) -> None:
+        mdp_file.write_text(mdp_text)
+        backend.grompp(
+            {
+                "f": mdp_file,
+                "c": input_structure,
+                "p": top_file,
+                "o": tpr_file,
+                "po": workdir / f"{stage.name}_mdout.mdp",
+                "maxwarn": stage.maxwarn,
+                **grompp_flags,
+            },
+            log=workdir / f"{stage.name}.grompp.out",
+        )
+        backend.mdrun(
+            {"s": tpr_file, "deffnm": workdir / stage.name, **global_mdrun_flags, **mdrun_flags},
+            log=workdir / f"{stage.name}.mdrun.out",
+        )
 
-            # Minimization - skip if already complete
-            min_mdp = mdp_dir / "min.mdp"
-            
-            if check_simulated_stage(workdir, SimulationStage.MINIMIZATION):
-                logger.info("MINIMIZATION stage already complete, skipping")
-            else:
-                results.append(
-                    runner.run_stage(
-                        stage=SimulationStage.MINIMIZATION,
-                        mdp_file=min_mdp,
-                        structure=Path("init.gro"),  # Relative path from workdir
-                        topology=top_file,
-                        output_prefix="min",
-                        maxwarn=4,
-                    )
-                )
-
-            # Check if minimization was successful
-            min_gro = Path("min.gro")
-            if not min_gro.exists():
-                logger.warning("min.gro not found, falling back to init.gro")
-                min_gro = Path("init.gro")
-
-            # Ensure init.gro exists for subsequent stages
-            init_gro = Path("init.gro")
-            if not init_gro.exists():
-                raise FileNotFoundError("Coordinate file (init.gro) not found after COORDINATE_GENERATION stage")
-
-            # Equilibration - skip if already complete
-            eq_mdp = mdp_dir / "eq.mdp"
-            
-            if check_simulated_stage(workdir, SimulationStage.EQUILIBRATION):
-                logger.info("EQUILIBRATION stage already complete, skipping")
-            else:
-                results.append(
-                    runner.run_stage(
-                        stage=SimulationStage.EQUILIBRATION,
-                        mdp_file=eq_mdp,
-                        structure=min_gro,
-                        topology=top_file,
-                        output_prefix="eq",
-                        maxwarn=4,
-                    )
-                )
-
-            # Check if equilibration was successful
-            eq_gro = Path("eq.gro")
-            if not eq_gro.exists():
-                logger.warning("eq.gro not found, falling back to min.gro")
-                eq_gro = Path("min.gro")
-
-            # AWH - skip if already complete
-            awh_mdp = mdp_dir / "awh.mdp"
-            
-            if check_simulated_stage(workdir, SimulationStage.AWH):
-                logger.info("AWH stage already complete, skipping")
-            else:
-                awh_mdp = mdp_dir / "awh.mdp"
-                results.append(
-                    runner.run_stage(
-                        stage=SimulationStage.AWH,
-                        mdp_file=awh_mdp,
-                        structure=eq_gro,
-                        topology=top_file,
-                        output_prefix="awh",
-                        maxwarn=4,
-                    )
-                )
-
-            # MD_PRODUCTION - skip if already complete
-            prod_mdp = mdp_dir / "prod.mdp"
-            
-            if check_simulated_stage(workdir, SimulationStage.MD_PRODUCTION):
-                logger.info("MD_PRODUCTION stage already complete, skipping")
-            else:
-                results.append(
-                    runner.run_stage(
-                        stage=SimulationStage.MD_PRODUCTION,
-                        mdp_file=prod_mdp,
-                        structure=eq_gro,
-                        topology=top_file,
-                        output_prefix="prod",
-                        maxwarn=4,
-                    )
-                )
-
-    finally:
-        # Ensure we're back in original directory even if an error occurs
-        pass  # _working_directory already handles this via context manager
-
-    return results
+    signature = {
+        "mdp": mdp_text,
+        "input": input_step,
+        "maxwarn": stage.maxwarn,
+        "grompp": grompp_flags,
+        "mdrun": mdrun_flags,
+    }
+    return Step(stage.name, signature, [tpr_file, workdir / f"{stage.name}.gro"], run_stage)
 
 
-if __name__ == "__main__":
-    # Example usage from script (similar to original run_simulation.py)
-    import sys
+def build_simulations(
+    config: CampaignConfig, output_dir: Path | None = None
+) -> list[Simulation]:
+    """Expand the build matrix and resolve every combination into a Simulation.
 
-    if len(sys.argv) < 3:
-        print("Usage: python -m martini_harness.simulation <target> <solvent> [n_target] [n_solvent] [--stop-after STAGE]")
-        print("")
-        print("Arguments:")
-        print("  target       Target molecule name/identifier (e.g., 'row42')")
-        print("  solvent      Solvent type (e.g., 'OCO', 'W', 'CLF')")
-        print("  n_target     Number of target molecules (default: 1)")
-        print("  n_solvent    Number of solvent molecules (default: 8000)")
-        print("")
-        print("Optional:")
-        print("  --stop-after STAGE   Stop after completing this stage (e.g., 'SETUP', 'COORDINATE_GENERATION',")
-        print("                       'MINIMIZATION', 'EQUILIBRATION', 'AWH'). Defaults to running all stages.")
-        sys.exit(1)
+    Args:
+        config: The campaign configuration.
+        output_dir: Overrides ``config.output_dir``.
 
-    target = sys.argv[1]
-    solvent = sys.argv[2]
-    n_target = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    n_solvent = int(sys.argv[4]) if len(sys.argv) > 4 else 8000
+    Raises:
+        ConfigError: Listing every problem found across all combinations.
+    """
+    output_dir = Path(output_dir).resolve() if output_dir else config.output_dir
+    errors = []
 
-    # Parse optional --stop-after argument
-    stop_after = None
-    i = 5
-    while i < len(sys.argv):
-        arg = sys.argv[i]
-        if arg == "--stop-after":
-            if i + 1 >= len(sys.argv):
-                print("Error: --stop-after requires a stage name argument")
-                sys.exit(1)
-            stop_after_str = sys.argv[i + 1]
-            try:
-                stop_after = SimulationStage[stop_after_str.upper()]
-            except KeyError:
-                valid_stages = [stage.name for stage in SimulationStage]
-                print(f"Error: Invalid stage '{stop_after_str}'. Valid stages: {', '.join(valid_stages)}")
-                sys.exit(1)
-            i += 2
+    defined_in: dict[str, Path] = {}
+    for include in config.topology.includes:
+        if not include.is_file():
+            errors.append(f"topology include not found: {include}")
+            continue
+        for molname in read_moleculetypes(include):
+            defined_in.setdefault(molname, include)
+
+    molecule_itps: dict[str, Path] = {}
+    for molname, itp in config.molecules.items():
+        if not itp.is_file():
+            errors.append(f"molecule {molname!r}: ITP file not found: {itp}")
+        elif molname not in read_moleculetypes(itp):
+            errors.append(f"molecule {molname!r}: no [ moleculetype ] {molname} in {itp}")
         else:
-            # Unknown argument, skip it
-            i += 1
+            molecule_itps[molname] = itp
 
-    results = run_simulation_workflow(
-        target=target, 
-        solvent=solvent, 
-        n_target=n_target, 
-        n_solvent=n_solvent,
-        stop_after=stop_after
+    library = None
+    if config.molecule_library is not None:
+        try:
+            library = MoleculeLibrary(config.molecule_library)
+        except LibraryError as exc:
+            errors.append(str(exc))
+    if errors:
+        raise ConfigError("\n".join(errors))
+
+    combinations = expand_matrix(
+        config.matrix.axes, config.matrix.include, config.matrix.exclude
     )
+    param_names = set(SimulationDefaults.model_fields)
+    simulations = []
+    seen_names: set[str] = set()
+    for index, combo in enumerate(combinations, start=1):
+        label = f"matrix combination {index} {combo}"
+        missing = [key for key in ("target", "solvent") if key not in combo]
+        if missing:
+            errors.append(f"{label}: missing {', '.join(missing)}")
+            continue
 
+        try:
+            params = SimulationDefaults.model_validate(
+                {
+                    **config.simulation.model_dump(),
+                    **{key: value for key, value in combo.items() if key in param_names},
+                }
+            )
+        except ValueError as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+
+        variables = {**params.model_dump(exclude={"name"}), **combo}
+        try:
+            name = render_value(params.name, variables)
+        except TemplateError as exc:
+            errors.append(f"{label}: simulation name: {exc}")
+            continue
+        if not SAFE_NAME.match(name):
+            errors.append(f"{label}: simulation name {name!r} is not a valid directory name")
+            continue
+        if name in seen_names:
+            errors.append(f"{label}: duplicate simulation name {name!r}")
+            continue
+        seen_names.add(name)
+        variables["name"] = name
+
+        includes = list(config.topology.includes)
+        for role in ("target", "solvent"):
+            molname = str(combo[role])
+            if molname in molecule_itps:
+                itp = molecule_itps[molname]
+            elif molname in defined_in:
+                continue
+            elif library is not None and molname in library:
+                itp = library.path(molname)
+                if not itp.is_file():
+                    errors.append(f"{name}: {role} {molname!r}: library file missing: {itp}")
+                    continue
+            else:
+                errors.append(
+                    f"{name}: {role} {molname!r} is not defined in the topology "
+                    "includes, the molecules section or the molecule library"
+                )
+                continue
+            if itp not in includes:
+                includes.append(itp)
+
+        spec = SimulationSpec(
+            name=name,
+            target=str(combo["target"]),
+            solvent=str(combo["solvent"]),
+            n_target=params.n_target,
+            n_solvent=params.n_solvent,
+            density=params.density,
+            includes=includes,
+            workdir=output_dir / name,
+            variables=variables,
+        )
+        try:
+            simulations.append(Simulation(spec, config))
+        except ConfigError as exc:
+            errors.append(f"{name}: {exc}")
+
+    if errors:
+        raise ConfigError("\n".join(errors))
+    return simulations
+
+
+def select_simulations(simulations: list[Simulation], names: list[str]) -> list[Simulation]:
+    """Return the simulations with the given names, in campaign order."""
+    known = {sim.name for sim in simulations}
+    unknown = [name for name in names if name not in known]
+    if unknown:
+        raise ConfigError(
+            f"unknown simulation(s): {', '.join(unknown)}; available: {', '.join(sorted(known))}"
+        )
+    return [sim for sim in simulations if sim.name in names]
+
+
+def run_campaign(
+    simulations: list[Simulation],
+    backend: Backend | None = None,
+    force: bool = False,
+) -> list[SimulationOutcome]:
+    """Run simulations one after another; a failing simulation does not stop the rest."""
+    backend = backend or GromacsWrapperBackend()
+    outcomes = []
+    for index, simulation in enumerate(simulations, start=1):
+        logger.info("(%d/%d) simulation %s", index, len(simulations), simulation.name)
+        outcomes.append(simulation.run(backend, force=force))
+    return outcomes
+
+
+def _hash(data: Any) -> str:
+    return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _file_hash(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None

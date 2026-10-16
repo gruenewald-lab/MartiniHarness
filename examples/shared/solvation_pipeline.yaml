@@ -1,0 +1,19 @@
+# Shared pipeline: minimization, equilibration and AWH solvation free energy.
+# Import it from a campaign file with
+#
+#   imports:
+#     - shared/solvation_pipeline.yaml
+#
+# and adjust single stages with `stage_overrides`. MDP files are relative to
+# mdp_dir (default: the MDP files shipped with martini_harness).
+
+stages:
+  - name: min
+    mdp: min.mdp
+  - name: eq
+    mdp: eq.mdp
+    maxwarn: 2          # Berendsen thermostat/barostat warnings
+  - name: awh
+    mdp: awh.mdp
+    substitute:
+      TOCOUPLE: "{target}"

@@ -1,220 +1,202 @@
 """Command-line interface for Martini Harness."""
 
 import argparse
+import json
 import logging
+import os
+import random
+import sys
+import time
 from pathlib import Path
 
-from .config import CampaignConfig, load_yaml_config
-from .simulation import SimulationCampaign
+from .config import ConfigError, load_campaign
+from .library import LibraryError, MoleculeLibrary, sample_molecules, split_itp
+from .simulation import (
+    STATUS_DONE,
+    STATUS_FAILED,
+    Simulation,
+    build_simulations,
+    run_campaign,
+    select_simulations,
+)
+from .topology import read_moleculetypes
+
+logger = logging.getLogger("martini_harness")
 
 
-def setup_logging(level: int = logging.INFO) -> None:
-    """Setup logging configuration.
-
-    Args:
-        level: Logging level (e.g., logging.DEBUG, logging.INFO).
-    """
-    handler = logging.StreamHandler()
-    handler.setLevel(level)
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+def setup_logging(verbose: bool = False) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
     )
-    handler.setFormatter(formatter)
 
-    logger = logging.getLogger("martini_harness")
-    logger.addHandler(handler)
-    logger.setLevel(level)
+
+def _load_simulations(args: argparse.Namespace) -> list[Simulation]:
+    config = load_campaign(args.config)
+    simulations = build_simulations(config, output_dir=args.output_dir)
+    if args.only:
+        simulations = select_simulations(simulations, args.only)
+    return simulations
+
+
+def print_status(simulations: list[Simulation]) -> None:
+    """Print one line per simulation with the status of each step."""
+    if not simulations:
+        print("No simulations.")
+        return
+    width = max(len(sim.name) for sim in simulations)
+    for sim in simulations:
+        statuses = sim.status()
+        steps = "  ".join(f"{s.name}:{s.status}" for s in statuses)
+        print(f"{sim.name:<{width}}  {steps}")
+        for s in statuses:
+            if s.status == STATUS_FAILED and s.error:
+                print(f"{'':<{width}}    {s.name} error: {s.error}")
+    print(f"\nOutput directory: {simulations[0].spec.workdir.parent}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """Run a simulation campaign from YAML configuration.
+    simulations = _load_simulations(args)
+    if args.dry_run:
+        print_status(simulations)
+        pending = sum(
+            any(s.status != STATUS_DONE for s in sim.status()) for sim in simulations
+        )
+        print(f"{pending}/{len(simulations)} simulation(s) have steps to run.")
+        return 0
 
-    Args:
-        args: Parsed command line arguments.
+    outcomes = run_campaign(simulations, force=args.force)
+    failed = [o for o in outcomes if not o.success]
+    logger.info("Campaign finished: %d/%d simulations succeeded", len(outcomes) - len(failed), len(outcomes))
+    for outcome in failed:
+        logger.error("  %s failed at %s: %s", outcome.name, outcome.failed, outcome.error)
+    return 1 if failed else 0
 
-    Returns:
-        Exit code (0 for success, non-zero for failure).
-    """
-    setup_logging(logging.DEBUG if args.verbose else logging.INFO)
 
-    logger = logging.getLogger("martini_harness")
-
-    # Load configuration
-    try:
-        config_path = Path(args.config)
-        if not config_path.exists():
-            logger.error(f"Configuration file not found: {config_path}")
-            return 1
-
-        config = load_yaml_config(config_path)
-        logger.info("Loaded configuration from %s", args.config)
-
-        # Override output directory if specified
-        if args.output_dir:
-            config.output_base = Path(args.output_dir).resolve()
-
-        # Create and run campaign
-        campaign = SimulationCampaign(config)
-
-        try:
-            results = campaign.run_all()
-
-            # Summary
-            total_stages = len(results)
-            successful_stages = sum(1 for r in results if r.success)
-
-            logger.info(
-                "Campaign completed: %d/%d stages successful",
-                successful_stages,
-                total_stages,
-            )
-
-            return 0 if successful_stages == total_stages else 1
-
-        except Exception as e:
-            logger.error("Campaign execution failed: %s", e)
-            return 1
-
-    except Exception as e:
-        logger.error("Failed to load configuration: %s", e)
-        import traceback
-        traceback.print_exc()
-        return 1
+def cmd_status(args: argparse.Namespace) -> int:
+    print_status(_load_simulations(args))
+    return 0
 
 
 def cmd_list_molecules(args: argparse.Namespace) -> int:
-    """List available molecules from the force field.
-
-    Args:
-        args: Parsed command line arguments.
-
-    Returns:
-        Exit code (0 for success).
-    """
-    setup_logging(logging.WARNING)
-
-    try:
-        import sys
-
-        # Read row42.itp or similar molecule definition file
-        from martini_harness import get_package_data_path
-
-        mol_file = get_package_data_path("row42.itp")
-
-        if not mol_file.exists():
-            print(f"Molecule definition file not found: {mol_file}")
-            return 1
-
-        # Parse the ITP file to extract molecule names
-        try:
-            from polyply.src.topology import Topology
-            from vermouth.forcefield import ForceField
-
-            ff = ForceField("test")
-            top = Topology.from_gmx_topfile(str(mol_file), name="test")
-            mol_names = list(top.force_field.blocks.keys())
-
-            print("Available molecules:")
-            for mol in sorted(mol_names):
-                print(f"  {mol}")
-
-            return 0
-
-        except ImportError:
-            # Fallback: just read the file and try to extract names manually
-            print(f"Molecule definitions in {mol_file}:")
-            with open(mol_file, "r") as f:
-                content = f.read()
-
-            # Try to find [ molecules ] section
-            if "[ moleculetype ]" in content or "[ molecules ]" in content:
-                print("  (Could not parse ITP file without polyply/vermouth)")
-                return 1
-
-        return 0
-
-    except Exception as e:
-        logging.getLogger("martini_harness").error(f"Error listing molecules: {e}")
-        return 1
+    for itp in args.itp_files:
+        for name in read_moleculetypes(itp):
+            print(f"{name}\t{itp}")
+    return 0
 
 
-def main() -> int:
-    """Main entry point for the CLI.
+def cmd_split_itp(args: argparse.Namespace) -> int:
+    start = time.perf_counter()
+    result = split_itp(args.source, args.output, force=args.force)
+    elapsed = time.perf_counter() - start
+    for warning in result.warnings[:20]:
+        logger.warning(warning)
+    if len(result.warnings) > 20:
+        logger.warning("... and %d more warnings", len(result.warnings) - 20)
+    if result.duplicates:
+        logger.warning(
+            "%d duplicate molecule name(s) skipped (first definition kept), e.g. %s",
+            len(result.duplicates), ", ".join(result.duplicates[:5]),
+        )
+    logger.info("Wrote %d molecules to %s in %.1f s", result.written, args.output, elapsed)
+    return 0
 
-    Returns:
-        Exit code.
-    """
+
+def cmd_sample(args: argparse.Namespace) -> int:
+    library = MoleculeLibrary(args.library)
+    seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**31)
+    names = sample_molecules(library, args.n, seed)
+
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    library_path = os.path.relpath(library.library_dir.resolve(), output.parent)
+    lines = [
+        f"# {len(names)} of {len(library)} molecules sampled from {library_path} (seed {seed}).",
+        "# Import this file from a campaign: `imports: [" + output.name + "]`.",
+        f"molecule_library: {json.dumps(library_path)}",
+        "matrix:",
+        "  target:",
+    ]
+    lines += [f"    - {json.dumps(name)}" for name in names]
+    output.write_text("\n".join(lines) + "\n")
+    logger.info("Sampled %d of %d molecules (seed %d) into %s", len(names), len(library), seed, output)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="martini-harness",
-        description="A framework for running MD simulation campaigns with GROMACS and Polyply.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  Run a campaign from YAML configuration:
-    martini-harness run --config campaign.yaml
-
-  Run a single simulation directly:
-    martini-harness run-single target W
-
-  List available molecules:
-    martini-harness list-molecules
-
-  Create a new campaign configuration (template):
-    martini-harness new-config my_campaign
-        """,
+        prog="martini_harness",
+        description="Run Martini simulation campaigns defined in YAML files.",
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="enable debug logging")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    def add_campaign_args(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("config", type=Path, help="campaign YAML file")
+        sub.add_argument(
+            "-o", "--output-dir", type=Path, help="override the campaign's output_dir"
+        )
+        sub.add_argument(
+            "--only", action="append", metavar="NAME",
+            help="restrict to this simulation (repeatable)",
+        )
 
-    # Run command
-    run_parser = subparsers.add_parser("run", help="Run a simulation campaign from YAML config")
+    run_parser = subparsers.add_parser("run", help="run a campaign, resuming where it stopped")
+    add_campaign_args(run_parser)
     run_parser.add_argument(
-        "config", type=Path, nargs="?", help="YAML configuration file path"
+        "--dry-run", action="store_true", help="show what would run without running it"
     )
     run_parser.add_argument(
-        "--output-dir", "-o", type=Path, help="Override output directory"
-    )
-    run_parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable verbose logging"
+        "--force", action="store_true", help="rerun all steps, ignoring saved state"
     )
     run_parser.set_defaults(func=cmd_run)
 
-    # List molecules command
-    list_molecules_parser = subparsers.add_parser(
-        "list-molecules", help="List available molecules from the force field"
+    status_parser = subparsers.add_parser("status", help="show the progress of a campaign")
+    add_campaign_args(status_parser)
+    status_parser.set_defaults(func=cmd_status)
+
+    list_parser = subparsers.add_parser(
+        "list-molecules", help="list the molecule types defined in ITP files"
     )
-    list_molecules_parser.set_defaults(func=cmd_list_molecules)
+    list_parser.add_argument("itp_files", type=Path, nargs="+")
+    list_parser.set_defaults(func=cmd_list_molecules)
 
-    # New config command (placeholder for future)
-    new_config_parser = subparsers.add_parser(
-        "new-config", help="Create a new campaign configuration template"
+    split_parser = subparsers.add_parser(
+        "split-itp", help="split a multi-molecule ITP into a library of per-molecule ITPs"
     )
-    new_config_parser.add_argument("name", help="Name of the new configuration")
-    new_config_parser.set_defaults(func=lambda args: 1 if hasattr(args, 'func') else None)
+    split_parser.add_argument("source", type=Path, help="ITP file with many [ moleculetype ]s")
+    split_parser.add_argument("-o", "--output", type=Path, required=True, help="library directory")
+    split_parser.add_argument("--force", action="store_true", help="replace an existing library")
+    split_parser.set_defaults(func=cmd_split_itp)
 
-    # Parse arguments
-    parsed_args = parser.parse_args()
+    sample_parser = subparsers.add_parser(
+        "sample", help="randomly pick molecules from a library into an importable YAML file"
+    )
+    sample_parser.add_argument("library", type=Path, help="library directory from split-itp")
+    sample_parser.add_argument("-n", type=int, required=True, help="number of molecules")
+    sample_parser.add_argument("--seed", type=int, help="random seed (default: random, recorded in the file)")
+    sample_parser.add_argument("-o", "--output", type=Path, required=True, help="YAML file to write")
+    sample_parser.set_defaults(func=cmd_sample)
 
-    if not parsed_args.command:
-        parser.print_help()
-        return 0
+    return parser
 
-    # Execute command function
-    func = getattr(parsed_args, "func", None)
-    if func and callable(func):
-        try:
-            exit_code = func(parsed_args)
-            return exit_code if isinstance(exit_code, int) else 0
-        except Exception as e:
-            logging.getLogger("martini_harness").error(f"Command failed: {e}")
-            import traceback
 
-            traceback.print_exc()
-            return 1
-    else:
-        parser.print_help()
-        return 0
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    setup_logging(args.verbose)
+    try:
+        return args.func(args)
+    except ConfigError as exc:
+        logger.error("Invalid configuration:\n%s", exc)
+        return 2
+    except LibraryError as exc:
+        logger.error("%s", exc)
+        return 2
+    except KeyboardInterrupt:
+        logger.error("Interrupted; rerun the same command to resume.")
+        return 130
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())
