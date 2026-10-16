@@ -10,7 +10,13 @@ import time
 from pathlib import Path
 
 from .config import ConfigError, load_campaign
-from .library import LibraryError, MoleculeLibrary, sample_molecules, split_itp
+from .library import (
+    LibraryError,
+    MoleculeLibrary,
+    sample_molecules,
+    sample_per_group,
+    split_itp,
+)
 from .simulation import (
     STATUS_DONE,
     STATUS_FAILED,
@@ -106,13 +112,19 @@ def cmd_split_itp(args: argparse.Namespace) -> int:
 def cmd_sample(args: argparse.Namespace) -> int:
     library = MoleculeLibrary(args.library)
     seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**31)
-    names = sample_molecules(library, args.n, seed)
+    if args.per_group is not None:
+        names, sizes = sample_per_group(library, args.per_group, seed)
+        how = f"{args.per_group} from each of {len(sizes)} groups"
+        logger.info("Group sizes: %s", ", ".join(f"{g}: {n}" for g, n in sizes.items()))
+    else:
+        names = sample_molecules(library, args.n, seed)
+        how = "uniformly"
 
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     library_path = os.path.relpath(library.library_dir.resolve(), output.parent)
     lines = [
-        f"# {len(names)} of {len(library)} molecules sampled from {library_path} (seed {seed}).",
+        f"# {len(names)} of {len(library)} molecules sampled {how} from {library_path} (seed {seed}).",
         "# Import this file from a campaign: `imports: [" + output.name + "]`.",
         f"molecule_library: {json.dumps(library_path)}",
         "matrix:",
@@ -174,7 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
         "sample", help="randomly pick molecules from a library into an importable YAML file"
     )
     sample_parser.add_argument("library", type=Path, help="library directory from split-itp")
-    sample_parser.add_argument("-n", type=int, required=True, help="number of molecules")
+    how_many = sample_parser.add_mutually_exclusive_group(required=True)
+    how_many.add_argument("-n", type=int, help="number of molecules, drawn uniformly")
+    how_many.add_argument(
+        "--per-group", type=int, metavar="K",
+        help="draw K molecules from every group; the group is the name part before the "
+        "first '_' (e.g. the length in <length>_<molid>)",
+    )
     sample_parser.add_argument("--seed", type=int, help="random seed (default: random, recorded in the file)")
     sample_parser.add_argument("-o", "--output", type=Path, required=True, help="YAML file to write")
     sample_parser.set_defaults(func=cmd_sample)

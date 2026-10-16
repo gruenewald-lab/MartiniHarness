@@ -214,7 +214,16 @@ martini_harness sample library/ -n 500 --seed 1 -o campaigns/screen/targets.yaml
 ```
 
 The file sets `molecule_library` and the `target` axis of the matrix. Without
-`--seed` a random seed is chosen and recorded in the file. A campaign then
+`--seed` a random seed is chosen and recorded in the file.
+
+For names formatted `<length>_<molid>`, `--per-group K` replaces `-n` and
+draws exactly K molecules of every length (the group is the part of the name
+before the first `_`). Group sizes are logged, and sampling fails if a group
+has fewer than K molecules:
+
+```bash
+martini_harness sample library/ --per-group 50 --seed 1 -o campaigns/screen/targets.yaml
+``` A campaign then
 only adds what is missing:
 
 ```yaml
