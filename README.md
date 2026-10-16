@@ -27,6 +27,8 @@ martini_harness run examples/sample_campaign.yaml --dry-run   # show what would 
 martini_harness run examples/sample_campaign.yaml             # run / resume
 martini_harness status examples/sample_campaign.yaml          # progress per step
 martini_harness list-molecules examples/row42.itp             # molecule types in ITPs
+martini_harness split-itp big.itp -o library/                  # one ITP per molecule
+martini_harness sample library/ -n 500 --seed 1 -o targets.yaml  # random subset
 ```
 
 `run` and `status` accept `--only NAME` (repeatable) to select simulations and
@@ -189,6 +191,47 @@ MDP uses `integrator = steep`, `cg` or `l-bfgs`). A stage's own `mdrun`
 flags take precedence. Because these flags describe the machine rather than
 the simulation, changing them does not rerun finished steps.
 
+## Large molecule libraries
+
+A single ITP holding tens of thousands of molecules is too slow to read for
+every simulation. Split it once into a library of per-molecule files:
+
+```bash
+martini_harness split-itp all_molecules.itp -o library/
+```
+
+This writes `library/index.tsv` (molecule name → file) and one ITP per
+molecule, sharded into 256 subdirectories. Splitting 77,000 molecules
+(170 MB) takes about 10 s, most of it creating the files. Duplicate names
+keep the first definition, content before the first `[ moleculetype ]` is
+saved to `_preamble.itp` (not included automatically), and blocks with
+unbalanced `#if`/`#endif` are reported.
+
+Pick a random subset into a file that a campaign can import:
+
+```bash
+martini_harness sample library/ -n 500 --seed 1 -o campaigns/screen/targets.yaml
+```
+
+The file sets `molecule_library` and the `target` axis of the matrix. Without
+`--seed` a random seed is chosen and recorded in the file. A campaign then
+only adds what is missing:
+
+```yaml
+# campaigns/screen/campaign.yaml
+imports:
+  - targets.yaml
+  - ../../examples/shared/solvation_pipeline.yaml
+output_dir: out
+matrix:
+  solvent: [W, OCO]
+```
+
+Targets and solvents are looked up in `molecules` first, then in the
+topology includes, then in `molecule_library`. Only the index and the ITPs
+of the sampled molecules are read when the campaign is built or run, and each
+`system.top` includes just its own molecule's file.
+
 ## Output and resuming
 
 Each simulation gets a directory `<output_dir>/<name>/` containing
@@ -231,6 +274,7 @@ martini_harness/
 ├── backend.py      # polyply / GROMACS execution
 ├── mdp.py          # MDP rendering and templating
 ├── topology.py     # topology writing, ITP parsing
+├── library.py      # splitting large ITPs, molecule libraries, sampling
 └── data/           # Martini 3 ITPs and MDP templates
 examples/           # sample campaigns, shared import files, molecule
 tests/

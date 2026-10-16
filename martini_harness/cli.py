@@ -1,11 +1,16 @@
 """Command-line interface for Martini Harness."""
 
 import argparse
+import json
 import logging
+import os
+import random
 import sys
+import time
 from pathlib import Path
 
 from .config import ConfigError, load_campaign
+from .library import LibraryError, MoleculeLibrary, sample_molecules, split_itp
 from .simulation import (
     STATUS_DONE,
     STATUS_FAILED,
@@ -81,6 +86,44 @@ def cmd_list_molecules(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_split_itp(args: argparse.Namespace) -> int:
+    start = time.perf_counter()
+    result = split_itp(args.source, args.output, force=args.force)
+    elapsed = time.perf_counter() - start
+    for warning in result.warnings[:20]:
+        logger.warning(warning)
+    if len(result.warnings) > 20:
+        logger.warning("... and %d more warnings", len(result.warnings) - 20)
+    if result.duplicates:
+        logger.warning(
+            "%d duplicate molecule name(s) skipped (first definition kept), e.g. %s",
+            len(result.duplicates), ", ".join(result.duplicates[:5]),
+        )
+    logger.info("Wrote %d molecules to %s in %.1f s", result.written, args.output, elapsed)
+    return 0
+
+
+def cmd_sample(args: argparse.Namespace) -> int:
+    library = MoleculeLibrary(args.library)
+    seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**31)
+    names = sample_molecules(library, args.n, seed)
+
+    output = args.output.resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    library_path = os.path.relpath(library.library_dir.resolve(), output.parent)
+    lines = [
+        f"# {len(names)} of {len(library)} molecules sampled from {library_path} (seed {seed}).",
+        "# Import this file from a campaign: `imports: [" + output.name + "]`.",
+        f"molecule_library: {json.dumps(library_path)}",
+        "matrix:",
+        "  target:",
+    ]
+    lines += [f"    - {json.dumps(name)}" for name in names]
+    output.write_text("\n".join(lines) + "\n")
+    logger.info("Sampled %d of %d molecules (seed %d) into %s", len(names), len(library), seed, output)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="martini_harness",
@@ -119,6 +162,23 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("itp_files", type=Path, nargs="+")
     list_parser.set_defaults(func=cmd_list_molecules)
 
+    split_parser = subparsers.add_parser(
+        "split-itp", help="split a multi-molecule ITP into a library of per-molecule ITPs"
+    )
+    split_parser.add_argument("source", type=Path, help="ITP file with many [ moleculetype ]s")
+    split_parser.add_argument("-o", "--output", type=Path, required=True, help="library directory")
+    split_parser.add_argument("--force", action="store_true", help="replace an existing library")
+    split_parser.set_defaults(func=cmd_split_itp)
+
+    sample_parser = subparsers.add_parser(
+        "sample", help="randomly pick molecules from a library into an importable YAML file"
+    )
+    sample_parser.add_argument("library", type=Path, help="library directory from split-itp")
+    sample_parser.add_argument("-n", type=int, required=True, help="number of molecules")
+    sample_parser.add_argument("--seed", type=int, help="random seed (default: random, recorded in the file)")
+    sample_parser.add_argument("-o", "--output", type=Path, required=True, help="YAML file to write")
+    sample_parser.set_defaults(func=cmd_sample)
+
     return parser
 
 
@@ -129,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except ConfigError as exc:
         logger.error("Invalid configuration:\n%s", exc)
+        return 2
+    except LibraryError as exc:
+        logger.error("%s", exc)
         return 2
     except KeyboardInterrupt:
         logger.error("Interrupted; rerun the same command to resume.")

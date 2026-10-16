@@ -26,6 +26,7 @@ from .config import (
     StageConfig,
     SAFE_NAME,
 )
+from .library import LibraryError, MoleculeLibrary
 from .matrix import expand_matrix
 from .mdp import TemplateError, is_minimization, render_mdp, render_value
 from .state import DONE, FAILED, StateFile
@@ -308,6 +309,13 @@ def build_simulations(
             errors.append(f"molecule {molname!r}: no [ moleculetype ] {molname} in {itp}")
         else:
             molecule_itps[molname] = itp
+
+    library = None
+    if config.molecule_library is not None:
+        try:
+            library = MoleculeLibrary(config.molecule_library)
+        except LibraryError as exc:
+            errors.append(str(exc))
     if errors:
         raise ConfigError("\n".join(errors))
 
@@ -354,13 +362,22 @@ def build_simulations(
         for role in ("target", "solvent"):
             molname = str(combo[role])
             if molname in molecule_itps:
-                if molecule_itps[molname] not in includes:
-                    includes.append(molecule_itps[molname])
-            elif molname not in defined_in:
+                itp = molecule_itps[molname]
+            elif molname in defined_in:
+                continue
+            elif library is not None and molname in library:
+                itp = library.path(molname)
+                if not itp.is_file():
+                    errors.append(f"{name}: {role} {molname!r}: library file missing: {itp}")
+                    continue
+            else:
                 errors.append(
                     f"{name}: {role} {molname!r} is not defined in the topology "
-                    "includes or the molecules section"
+                    "includes, the molecules section or the molecule library"
                 )
+                continue
+            if itp not in includes:
+                includes.append(itp)
 
         spec = SimulationSpec(
             name=name,

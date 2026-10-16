@@ -38,7 +38,7 @@ RESERVED_STEP_NAMES = {TOPOLOGY_STEP, COORDINATES_STEP}
 
 IMPORTS_KEY = "imports"
 # Top-level keys holding a path relative to the file that sets them.
-FILE_RELATIVE_KEYS = ("output_dir", "forcefield_dir", "mdp_dir")
+FILE_RELATIVE_KEYS = ("output_dir", "forcefield_dir", "mdp_dir", "molecule_library")
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9._+-]+$")
 
@@ -146,6 +146,10 @@ class CampaignConfig(_Model):
     molecules: dict[str, Path] = Field(
         default_factory=dict, description="Target molecule name -> ITP file."
     )
+    molecule_library: Path | None = Field(
+        default=None,
+        description="Library from `martini_harness split-itp`, searched after `molecules`.",
+    )
     matrix: MatrixConfig
     simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)
     stages: list[StageConfig] = Field(default_factory=default_stages)
@@ -167,6 +171,8 @@ class CampaignConfig(_Model):
         self.output_dir = _resolve(self.output_dir, base_dir)
         self.forcefield_dir = _resolve(self.forcefield_dir, base_dir)
         self.mdp_dir = _resolve(self.mdp_dir, base_dir)
+        if self.molecule_library is not None:
+            self.molecule_library = _resolve(self.molecule_library, base_dir)
         self.topology.includes = [
             _resolve(path, self.forcefield_dir) for path in self.topology.includes
         ]
