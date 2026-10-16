@@ -30,7 +30,7 @@ from .library import LibraryError, MoleculeLibrary
 from .matrix import expand_matrix
 from .mdp import TemplateError, is_minimization, render_mdp, render_value
 from .state import DONE, FAILED, StateError, StateFile
-from .topology import read_moleculetypes, render_topology
+from .topology import count_atoms, read_moleculetypes, render_topology
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ class SimulationSpec:
     includes: list[Path]
     workdir: Path
     variables: dict[str, Any] = field(default_factory=dict)
+    target_atoms: int | None = None
 
 
 @dataclass
@@ -258,6 +259,12 @@ def _stage_step(
     except TemplateError as exc:
         raise ConfigError(f"stage {stage.name!r}: {exc}") from exc
 
+    run_mdrun_flags = {**global_mdrun_flags, **mdrun_flags}
+    if spec.target_atoms == 1 and str(run_mdrun_flags.get("bonded", "")).lower() == "gpu":
+        # mdrun refuses -bonded gpu when there is nothing bonded to compute.
+        del run_mdrun_flags["bonded"]
+        logger.debug("[%s] %s: single-bead target, not passing -bonded gpu", spec.name, stage.name)
+
     input_step = stage.input or previous
     input_structure = structures[input_step]
     mdp_file = workdir / f"{stage.name}.mdp"
@@ -278,7 +285,7 @@ def _stage_step(
             log=workdir / f"{stage.name}.grompp.out",
         )
         backend.mdrun(
-            {"s": tpr_file, "deffnm": workdir / stage.name, **global_mdrun_flags, **mdrun_flags},
+            {"s": tpr_file, "deffnm": workdir / stage.name, **run_mdrun_flags},
             log=workdir / f"{stage.name}.mdrun.out",
         )
 
@@ -373,11 +380,14 @@ def build_simulations(
         variables["name"] = name
 
         includes = list(config.topology.includes)
+        target_itp = None
         for role in ("target", "solvent"):
             molname = str(combo[role])
             if molname in molecule_itps:
                 itp = molecule_itps[molname]
             elif molname in defined_in:
+                if role == "target":
+                    target_itp = defined_in[molname]
                 continue
             elif library is not None and molname in library:
                 itp = library.path(molname)
@@ -390,6 +400,8 @@ def build_simulations(
                     "includes, the molecules section or the molecule library"
                 )
                 continue
+            if role == "target":
+                target_itp = itp
             if itp not in includes:
                 includes.append(itp)
 
@@ -403,6 +415,7 @@ def build_simulations(
             includes=includes,
             workdir=output_dir / name,
             variables=variables,
+            target_atoms=count_atoms(target_itp, str(combo["target"])) if target_itp else None,
         )
         try:
             simulations.append(Simulation(spec, config))

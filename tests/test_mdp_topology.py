@@ -11,7 +11,7 @@ from martini_harness.mdp import (
     render_value,
     set_mdp_params,
 )
-from martini_harness.topology import read_moleculetypes, render_topology
+from martini_harness.topology import count_atoms, read_moleculetypes, render_topology
 
 TEMPLATE = """\
 integrator   = sd   ; stochastic dynamics
@@ -67,3 +67,11 @@ def test_is_minimization():
     assert not is_minimization("nsteps = 10\n")  # GROMACS default integrator is md
     assert is_minimization((DEFAULT_MDP_DIR / "min.mdp").read_text())
     assert not any(is_minimization((DEFAULT_MDP_DIR / f).read_text()) for f in ("eq.mdp", "awh.mdp"))
+
+
+def test_count_atoms():
+    solvents = DEFAULT_FORCEFIELD_DIR / "martini_v3.0.0_solvents_v1.itp"
+    assert count_atoms(Path(__file__).parent.parent / "examples" / "row42.itp", "row42") == 8
+    assert count_atoms(solvents, "W") == 1
+    assert count_atoms(solvents, "OCO") == 3
+    assert count_atoms(solvents, "row42") is None

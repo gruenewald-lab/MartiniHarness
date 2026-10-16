@@ -238,3 +238,31 @@ def test_keyboard_interrupt_still_stops_the_campaign(campaign_file):
     with pytest.raises(KeyboardInterrupt):
         run_campaign(_simulations(campaign_file(BASIC_CAMPAIGN)), backend)
     assert [kind for kind, _ in backend.calls] == ["coords"]
+
+
+def test_bonded_gpu_is_dropped_for_single_bead_targets(campaign_file, tmp_path, fake_backend):
+    (tmp_path / "bead.itp").write_text("[ moleculetype ]\nbead 1\n[ atoms ]\n1 TC3 1 BED C1 1 0.0\n")
+    body = """
+    output_dir: out
+    molecules:
+      row42: row42.itp
+      bead: bead.itp
+    simulation: {n_solvent: 100}
+    mdrun: {bonded: gpu, ntomp: 4}
+    matrix:
+      target: [row42, bead, W]     # W: single bead from the force-field includes
+      solvent: [OCO]
+    """
+    simulations = _simulations(campaign_file(body))
+    assert {sim.name: sim.spec.target_atoms for sim in simulations} == {
+        "row42_in_OCO": 8, "bead_in_OCO": 1, "W_in_OCO": 1,
+    }
+    run_campaign(simulations, fake_backend)
+
+    mdruns = [flags for kind, flags in fake_backend.calls if kind == "mdrun"]
+    for flags in mdruns:
+        simulation, stage = flags["deffnm"].parent.name, flags["deffnm"].name
+        if stage == "min":
+            continue
+        assert flags["ntomp"] == 4
+        assert ("bonded" in flags) == (simulation == "row42_in_OCO"), (simulation, stage)

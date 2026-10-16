@@ -191,6 +191,10 @@ MDP uses `integrator = steep`, `cg` or `l-bfgs`). A stage's own `mdrun`
 flags take precedence. Because these flags describe the machine rather than
 the simulation, changing them does not rerun finished steps.
 
+`bonded: gpu` is left out for simulations whose target molecule is a single
+bead, because mdrun refuses `-bonded gpu` when there are no bonded
+interactions to compute.
+
 ## Large molecule libraries
 
 A single ITP holding tens of thousands of molecules is too slow to read for
