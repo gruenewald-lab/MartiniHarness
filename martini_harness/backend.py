@@ -1,6 +1,9 @@
 """Execution backends that run the external programs (polyply, GROMACS)."""
 
 import logging
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -57,10 +60,23 @@ class GromacsWrapperBackend:
     @staticmethod
     def _run(tool: Any, flags: dict[str, Any], log: Path) -> None:
         flags = {key: str(value) if isinstance(value, Path) else value for key, value in flags.items()}
-        with open(log, "w") as handle:
+        # GROMACS writes some files (e.g. step*.pdb dumps when constraints fail)
+        # to the current directory, so run it inside the simulation directory.
+        # Simulations run one at a time, so changing the process-wide cwd is safe.
+        with open(log, "w") as handle, _working_directory(log.parent):
             try:
                 returncode, _, _ = tool(stdout=handle, stderr=handle, **flags)
             except Exception as exc:
                 raise BackendError(f"{tool.command_name} failed; see {log}") from exc
         if returncode != 0:
             raise BackendError(f"{tool.command_name} exited with code {returncode}; see {log}")
+
+
+@contextmanager
+def _working_directory(path: Path) -> Iterator[None]:
+    previous = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
