@@ -46,7 +46,9 @@ class StateFile:
         entry = self._steps.get(step)
         return entry is not None and entry["status"] == DONE and entry["key"] == key
 
-    def record(self, step: str, key: str, status: str, error: str | None = None) -> None:
+    def record(
+        self, step: str, key: str, status: str, error: str | None = None, reason: str | None = None
+    ) -> None:
         entry = {
             "key": key,
             "status": status,
@@ -54,6 +56,8 @@ class StateFile:
         }
         if error is not None:
             entry["error"] = error
+        if reason is not None:
+            entry["reason"] = reason
         self._steps[step] = entry
         self._save()
 

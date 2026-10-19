@@ -283,6 +283,7 @@ Production stage 'awh': 1000 simulation(s)
   complete        612  ( 61.2%)
   incomplete        4  (  0.4%)  running or interrupted, median progress 37%
   failed           21  (  2.1%)  at awh 15, coords 6
+      reasons: LINCS, then non-finite energy 9, GPU 6, coordinate generation (polyply) 6
   not started     363  ( 36.3%)  next step: eq 1, topology 362
 ```
 
@@ -294,7 +295,20 @@ the end of each xvg file is read, and a half-written last line is ignored.
 Runs whose xvg stops early are **incomplete** (still running or
 interrupted); **failed** and **not started** come from the state files.
 
-`--details` adds one line per simulation with its progress; `--list
+### Failure reasons
+
+When a step fails, the harness reads the end of its program output
+(`<stage>.mdrun.out`, `<stage>.log`, `<stage>.grompp.out`), extracts the
+GROMACS error message and classifies it, e.g. `LINCS`, `LINCS, then
+non-finite energy`, `GPU`, `non-finite forces (pforce)`, `too many grompp
+warnings`, `atoms moved too far`, `out of memory`, `killed by signal 9` or
+`coordinate generation (polyply)`. LINCS warnings and large forces listed by
+`-pforce` before the error are added as notes. The reason is stored in the
+state file and shown at the end of `run`, by `status` and by `check`. `check`
+also reads the logs directly, so it gives reasons for older batches and for
+incomplete runs that crashed without the failure being recorded.
+
+`--details` adds one line per simulation with its progress and reason; `--list
 complete|incomplete|failed|not-started` prints just the names, e.g. to
 feed into `run --only`.
 
@@ -317,6 +331,7 @@ martini_harness/
 ├── matrix.py       # build-matrix expansion
 ├── simulation.py   # simulations, steps, resume logic, campaign runner
 ├── check.py        # production completion check (xvg last frame)
+├── diagnose.py     # failure reasons from GROMACS output
 ├── state.py        # per-simulation state file
 ├── backend.py      # polyply / GROMACS execution
 ├── mdp.py          # MDP rendering and templating

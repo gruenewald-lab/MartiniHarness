@@ -59,7 +59,7 @@ def print_status(simulations: list[Simulation]) -> None:
         print(f"{sim.name:<{width}}  {steps}")
         for s in statuses:
             if s.status == STATUS_FAILED and s.error:
-                print(f"{'':<{width}}    {s.name} error: {s.error}")
+                print(f"{'':<{width}}    {s.name} error: {s.reason or s.error}")
     print(f"\nOutput directory: {simulations[0].spec.workdir.parent}")
 
 
@@ -77,7 +77,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     failed = [o for o in outcomes if not o.success]
     logger.info("Campaign finished: %d/%d simulations succeeded", len(outcomes) - len(failed), len(outcomes))
     for outcome in failed:
-        logger.error("  %s failed at %s: %s", outcome.name, outcome.failed, outcome.error)
+        logger.error(
+            "  %s failed at %s: %s", outcome.name, outcome.failed, outcome.reason or outcome.error
+        )
     return 1 if failed else 0
 
 
@@ -117,6 +119,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             extra = {"failed": f"at {check.failed_step}", "not-started": f"next: {check.next_step}"}.get(
                 check.category, ""
             )
+            if check.diagnosis is not None:
+                extra = f"{extra}  {check.diagnosis}".strip()
+            elif check.category == "failed" and check.error:
+                extra = f"{extra}  {check.error}"
+            if len(extra) > 160:
+                extra = extra[:157] + "..."
             print(f"{check.name:<{width}}  {check.category:<11}  {progress}  {extra}")
     return 0
 

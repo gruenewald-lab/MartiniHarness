@@ -12,6 +12,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from .diagnose import Diagnosis, diagnose_step
 from .mdp import get_mdp_param
 from .simulation import STATUS_DONE, STATUS_FAILED, Simulation
 
@@ -36,6 +37,14 @@ class ProductionCheck:
     failed_step: str | None = None
     error: str | None = None
     next_step: str | None = None
+    diagnosis: Diagnosis | None = None
+
+    @property
+    def reason(self) -> str | None:
+        """Short failure category, for failed runs and incomplete runs that crashed."""
+        if self.diagnosis is not None:
+            return self.diagnosis.reason
+        return "unknown" if self.category == FAILED else None
 
     @property
     def progress(self) -> float | None:
@@ -126,8 +135,10 @@ def check_production(simulation: Simulation, stage: str, nsteps_override: int | 
         check.category = FAILED
         check.failed_step = failed.name
         check.error = failed.error
+        check.diagnosis = diagnose_step(workdir, failed.name, failed.error)
     elif xvg.is_file():
         check.category = INCOMPLETE
+        check.diagnosis = diagnose_step(workdir, stage)  # None while it is still running
     check.next_step = next(
         (s.name for s in statuses if s.status != STATUS_DONE), f"none ({stage}.xvg missing)"
     )
@@ -151,10 +162,16 @@ def summarize(checks: list[ProductionCheck], stage: str) -> str:
     if progress:
         detail = f"  running or interrupted, median progress {100 * progress[len(progress) // 2]:.0f}%"
     lines.append(f"  incomplete   {share(len(incomplete))}{detail}")
+    crashed = Counter(c.reason for c in incomplete if c.reason)
+    if crashed:
+        lines.append(f"      {sum(crashed.values())} with an error in the log: {_format_counts(crashed)}")
 
     failed = Counter(c.failed_step for c in checks if c.category == FAILED)
     detail = f"  at {_format_counts(failed)}" if failed else ""
     lines.append(f"  failed       {share(by_category[FAILED])}{detail}")
+    reasons = Counter(c.reason for c in checks if c.category == FAILED)
+    if reasons:
+        lines.append(f"      reasons: {_format_counts(reasons)}")
 
     waiting = Counter(c.next_step or "-" for c in checks if c.category == NOT_STARTED)
     detail = f"  next step: {_format_counts(waiting)}" if waiting else ""

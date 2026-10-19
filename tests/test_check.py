@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from martini_harness.check import (
 )
 from martini_harness.config import load_campaign
 from martini_harness.simulation import build_simulations, run_campaign
+from martini_harness.state import STATE_FILE_NAME
 
 from .conftest import BASIC_CAMPAIGN, FakeBackend
 
@@ -133,3 +135,59 @@ def test_check_cli(campaign_file, capsys):
 
     assert cli.main(["check", str(path), "--stage", "min"]) == 0  # no min.xvg: never complete
     assert cli.main(["check", str(path), "--stage", "nope"]) == 2
+
+
+ERRORS = Path(__file__).parent / "data" / "gromacs_errors"
+
+
+class CrashingBackend(XvgBackend):
+    """mdrun of the awh stage fails like real GROMACS, per simulation directory."""
+
+    def __init__(self, crashes: dict[str, str]):
+        super().__init__({})
+        self.crashes = crashes
+
+    def mdrun(self, flags, log):
+        deffnm = Path(flags["deffnm"])
+        sample = self.crashes.get(deffnm.parent.name)
+        if sample and deffnm.name == "awh":
+            Path(log).write_text((ERRORS / sample).read_text())
+            raise RuntimeError(f"mdrun failed; see {log}")
+        super().mdrun(flags, log)
+
+
+def test_failure_reasons_in_state_status_and_check(campaign_file, tmp_path, capsys):
+    path = campaign_file(SHORT_AWH)
+    crashes = {"row42_in_CLF": "lpf.mdrun.out", "row42_in_OCO": "bgpu.mdrun.out", "row42_in_TCM": "lpf.mdrun.out"}
+    outcomes = run_campaign(build_simulations(load_campaign(path)), CrashingBackend(crashes))
+    reasons = {o.name: o.reason for o in outcomes}
+    assert reasons["row42_in_W"] is None
+    assert reasons["row42_in_CLF"].startswith("non-finite forces (pforce)")
+    assert reasons["row42_in_OCO"].startswith("GPU: Bonded interactions on GPU are not supported")
+
+    status = {s.name: s for s in build_simulations(load_campaign(path))[1].status()}
+    assert status["awh"].reason.startswith("non-finite forces (pforce)")
+
+    # An older batch has no reason in its state files: check reads the logs instead.
+    state_file = tmp_path / "out" / "row42_in_OCO" / STATE_FILE_NAME
+    state = json.loads(state_file.read_text())
+    del state["steps"]["awh"]["reason"]
+    state_file.write_text(json.dumps(state))
+
+    assert cli.main(["check", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "failed            3  ( 75.0%)  at awh 3" in out
+    assert "reasons: non-finite forces (pforce) 2, GPU 1" in out
+    assert cli.main(["check", str(path), "--details"]) == 0
+    assert "row42_in_OCO  failed           -  at awh  GPU: Bonded interactions" in capsys.readouterr().out
+
+
+def test_crashed_incomplete_run_is_reported(campaign_file, tmp_path, capsys):
+    path = campaign_file(SHORT_AWH)
+    run_campaign(build_simulations(load_campaign(path))[:1], XvgBackend({"row42_in_W": 0.5}))
+    # The harness itself was killed, so no failure was recorded, but mdrun's output has the error.
+    workdir = tmp_path / "out" / "row42_in_W"
+    (workdir / "awh.mdrun.out").write_text((ERRORS / "lincs.mdrun.out").read_text())
+
+    assert cli.main(["check", str(path)]) == 0
+    assert "1 with an error in the log: LINCS, then non-finite energy 1" in capsys.readouterr().out

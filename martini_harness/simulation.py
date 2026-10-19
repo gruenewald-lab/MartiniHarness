@@ -27,6 +27,7 @@ from .config import (
     StageConfig,
     SAFE_NAME,
 )
+from .diagnose import diagnose_step
 from .library import LibraryError, MoleculeLibrary
 from .matrix import expand_matrix
 from .mdp import TemplateError, is_minimization, render_mdp, render_value
@@ -77,6 +78,7 @@ class StepStatus:
     name: str
     status: str
     error: str | None = None
+    reason: str | None = None
 
 
 @dataclass
@@ -86,6 +88,7 @@ class SimulationOutcome:
     skipped: list[str] = field(default_factory=list)
     failed: str | None = None
     error: str | None = None
+    reason: str | None = None
 
     @property
     def success(self) -> bool:
@@ -131,7 +134,9 @@ class Simulation:
                 if entry is None:
                     statuses.append(StepStatus(step.name, STATUS_PENDING))
                 elif entry["status"] == FAILED:
-                    statuses.append(StepStatus(step.name, STATUS_FAILED, entry.get("error")))
+                    statuses.append(
+                        StepStatus(step.name, STATUS_FAILED, entry.get("error"), entry.get("reason"))
+                    )
                 else:
                     statuses.append(StepStatus(step.name, STATUS_STALE))
         return statuses
@@ -179,10 +184,13 @@ class Simulation:
                 if missing:
                     raise BackendError(f"expected output(s) missing: {', '.join(missing)}")
             except (Exception, SystemExit) as exc:
-                logger.error("[%s] %s failed: %s", self.name, step.name, exc)
-                state.record(step.name, step.key, FAILED, str(exc))
+                diagnosis = diagnose_step(workdir, step.name, str(exc))
+                reason = str(diagnosis) if diagnosis else None
+                logger.error("[%s] %s failed: %s", self.name, step.name, reason or exc)
+                state.record(step.name, step.key, FAILED, str(exc), reason)
                 outcome.failed = step.name
                 outcome.error = str(exc)
+                outcome.reason = reason
                 return outcome
             state.record(step.name, step.key, DONE)
             outcome.ran.append(step.name)
