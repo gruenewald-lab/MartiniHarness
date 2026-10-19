@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from .check import CATEGORIES, check_production, summarize
 from .config import ConfigError, load_campaign
 from .library import (
     LibraryError,
@@ -82,6 +83,41 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     print_status(_load_simulations(args))
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    config = load_campaign(args.config)
+    stage = args.stage or config.stages[-1].name
+    if stage not in {s.name for s in config.stages}:
+        raise ConfigError(
+            f"no stage named {stage!r} (stages: {', '.join(s.name for s in config.stages)})"
+        )
+    simulations = build_simulations(config, output_dir=args.output_dir)
+    if args.only:
+        simulations = select_simulations(simulations, args.only)
+
+    nsteps = config.mdrun.get("nsteps")
+    checks = [
+        check_production(sim, stage, int(nsteps) if nsteps is not None else None)
+        for sim in simulations
+    ]
+    if args.list:
+        for check in checks:
+            if check.category == args.list:
+                print(check.name)
+        return 0
+
+    print(summarize(checks, stage))
+    if args.details:
+        print()
+        width = max((len(c.name) for c in checks), default=0)
+        for check in checks:
+            progress = f"{100 * check.progress:5.1f}%" if check.progress is not None else "    -"
+            extra = {"failed": f"at {check.failed_step}", "not-started": f"next: {check.next_step}"}.get(
+                check.category, ""
+            )
+            print(f"{check.name:<{width}}  {check.category:<11}  {progress}  {extra}")
     return 0
 
 
@@ -167,6 +203,24 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="show the progress of a campaign")
     add_campaign_args(status_parser)
     status_parser.set_defaults(func=cmd_status)
+
+    check_parser = subparsers.add_parser(
+        "check",
+        help="count simulations whose production stage finished (last xvg frame written)",
+    )
+    add_campaign_args(check_parser)
+    check_parser.add_argument(
+        "--stage", help="production stage to check (default: the last stage)"
+    )
+    output = check_parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--list", choices=CATEGORIES,
+        help="only print the names of simulations in this category, one per line",
+    )
+    output.add_argument(
+        "--details", action="store_true", help="also print one line per simulation"
+    )
+    check_parser.set_defaults(func=cmd_check)
 
     list_parser = subparsers.add_parser(
         "list-molecules", help="list the molecule types defined in ITP files"

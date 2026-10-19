@@ -26,6 +26,7 @@ GROMACS (`gmx`) must be on your `PATH`. Requires Python 3.10+.
 martini_harness run examples/sample_campaign.yaml --dry-run   # show what would run
 martini_harness run examples/sample_campaign.yaml             # run / resume
 martini_harness status examples/sample_campaign.yaml          # progress per step
+martini_harness check examples/sample_campaign.yaml           # how many production runs finished
 martini_harness list-molecules examples/row42.itp             # molecule types in ITPs
 martini_harness split-itp big.itp -o library/                  # one ITP per molecule
 martini_harness sample library/ -n 500 --seed 1 -o targets.yaml  # random subset
@@ -268,6 +269,35 @@ cannot be created, also skip only that simulation.
 `run` exits with code 1 if any simulation failed and 2 for configuration
 errors.
 
+## Checking production runs
+
+`check` counts how many simulations finished their production stage (by
+default the last stage, e.g. `awh`; choose another with `--stage`):
+
+```bash
+martini_harness check campaigns/screen/campaign.yaml
+```
+
+```
+Production stage 'awh': 1000 simulation(s)
+  complete        612  ( 61.2%)
+  incomplete        4  (  0.4%)  running or interrupted, median progress 37%
+  failed           21  (  2.1%)  at awh 15, coords 6
+  not started     363  ( 36.3%)  next step: eq 1, topology 362
+```
+
+A run is **complete** when the last frame of its dH/dλ output
+(`<stage>.xvg`) has been written: its last time reaches
+`tinit + ⌊nsteps / nstdhdl⌋ · nstdhdl · dt`, taken from the
+`<stage>_mdout.mdp` grompp wrote (an `-nsteps` mdrun flag is honoured). Only
+the end of each xvg file is read, and a half-written last line is ignored.
+Runs whose xvg stops early are **incomplete** (still running or
+interrupted); **failed** and **not started** come from the state files.
+
+`--details` adds one line per simulation with its progress; `--list
+complete|incomplete|failed|not-started` prints just the names, e.g. to
+feed into `run --only`.
+
 ## Development
 
 ```bash
@@ -286,6 +316,7 @@ martini_harness/
 ├── config.py       # YAML schema (pydantic) and loading
 ├── matrix.py       # build-matrix expansion
 ├── simulation.py   # simulations, steps, resume logic, campaign runner
+├── check.py        # production completion check (xvg last frame)
 ├── state.py        # per-simulation state file
 ├── backend.py      # polyply / GROMACS execution
 ├── mdp.py          # MDP rendering and templating

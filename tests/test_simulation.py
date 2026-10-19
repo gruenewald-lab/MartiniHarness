@@ -266,3 +266,13 @@ def test_bonded_gpu_is_dropped_for_single_bead_targets(campaign_file, tmp_path, 
             continue
         assert flags["ntomp"] == 4
         assert ("bonded" in flags) == (simulation == "row42_in_OCO"), (simulation, stage)
+
+
+def test_editing_a_molecule_itp_reruns_from_topology(campaign_file, tmp_path, fake_backend):
+    path = campaign_file(BASIC_CAMPAIGN)
+    run_campaign(_simulations(path), fake_backend)
+    itp = tmp_path / "row42.itp"
+    itp.write_text(itp.read_text().replace("TC3 1 row42 TC35", "TC4 1 row42 TC35"))
+
+    outcomes = run_campaign(_simulations(path), FakeBackend())
+    assert all(o.ran == ALL_STEPS for o in outcomes)

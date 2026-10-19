@@ -8,6 +8,7 @@ step runs, all later steps run too.
 """
 
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -469,4 +470,14 @@ def _hash(data: Any) -> str:
 
 
 def _file_hash(path: Path) -> str | None:
-    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return _cached_file_hash(path, stat.st_size, stat.st_mtime_ns)
+
+
+@functools.lru_cache(maxsize=4096)
+def _cached_file_hash(path: Path, size: int, mtime_ns: int) -> str:
+    # size and mtime are part of the cache key, so an edited file is rehashed.
+    return hashlib.sha256(path.read_bytes()).hexdigest()
