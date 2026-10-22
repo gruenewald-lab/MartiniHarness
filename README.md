@@ -26,6 +26,8 @@ GROMACS (`gmx`) must be on your `PATH`. Requires Python 3.10+.
 martini_harness run examples/sample_campaign.yaml --dry-run   # show what would run
 martini_harness run examples/sample_campaign.yaml             # run / resume
 martini_harness status examples/sample_campaign.yaml          # progress per step
+martini_harness check examples/sample_campaign.yaml           # how many production runs finished
+martini_harness analyze examples/sample_campaign.yaml         # run analyses, tabulate results
 martini_harness list-molecules examples/row42.itp             # molecule types in ITPs
 martini_harness split-itp big.itp -o library/                  # one ITP per molecule
 martini_harness sample library/ -n 500 --seed 1 -o targets.yaml  # random subset
@@ -191,6 +193,10 @@ MDP uses `integrator = steep`, `cg` or `l-bfgs`). A stage's own `mdrun`
 flags take precedence. Because these flags describe the machine rather than
 the simulation, changing them does not rerun finished steps.
 
+`bonded: gpu` is left out for simulations whose target molecule is a single
+bead, because mdrun refuses `-bonded gpu` when there are no bonded
+interactions to compute.
+
 ## Large molecule libraries
 
 A single ITP holding tens of thousands of molecules is too slow to read for
@@ -214,7 +220,16 @@ martini_harness sample library/ -n 500 --seed 1 -o campaigns/screen/targets.yaml
 ```
 
 The file sets `molecule_library` and the `target` axis of the matrix. Without
-`--seed` a random seed is chosen and recorded in the file. A campaign then
+`--seed` a random seed is chosen and recorded in the file.
+
+For names formatted `<length>_<molid>`, `--per-group K` replaces `-n` and
+draws exactly K molecules of every length (the group is the part of the name
+before the first `_`). Group sizes are logged, and sampling fails if a group
+has fewer than K molecules:
+
+```bash
+martini_harness sample library/ --per-group 50 --seed 1 -o campaigns/screen/targets.yaml
+``` A campaign then
 only adds what is missing:
 
 ```yaml
@@ -247,10 +262,103 @@ its outputs still exist; once a step runs, every later step runs too. So
 editing a stage's MDP reruns that stage and everything after it, while
 changing `density` reruns everything from `coords` on.
 
-A failing step stops its simulation and is recorded in the state file
-(`status` shows the error); the campaign continues with the next simulation.
+A failing simulation is skipped and the campaign continues with the next
+one; only Ctrl-C stops the loop. A failed step is recorded in the state file
+(`status` shows the error) and is retried on the next `run`. Problems outside
+a step, such as an unreadable state file or a simulation directory that
+cannot be created, also skip only that simulation.
 `run` exits with code 1 if any simulation failed and 2 for configuration
 errors.
+
+## Checking production runs
+
+`check` counts how many simulations finished their production stage (by
+default the last stage, e.g. `awh`; choose another with `--stage`):
+
+```bash
+martini_harness check campaigns/screen/campaign.yaml
+```
+
+```
+Production stage 'awh': 1000 simulation(s)
+  complete        612  ( 61.2%)
+  incomplete        4  (  0.4%)  running or interrupted, median progress 37%
+  failed           21  (  2.1%)  at awh 15, coords 6
+      reasons: LINCS, then non-finite energy 9, GPU 6, coordinate generation (polyply) 6
+  not started     363  ( 36.3%)  next step: eq 1, topology 362
+```
+
+A run is **complete** when the last frame of its dH/dλ output
+(`<stage>.xvg`) has been written: its last time reaches
+`tinit + ⌊nsteps / nstdhdl⌋ · nstdhdl · dt`, taken from the
+`<stage>_mdout.mdp` grompp wrote (an `-nsteps` mdrun flag is honoured). Only
+the end of each xvg file is read, and a half-written last line is ignored.
+Runs whose xvg stops early are **incomplete** (still running or
+interrupted); **failed** and **not started** come from the state files.
+
+### Failure reasons
+
+When a step fails, the harness reads the end of its program output
+(`<stage>.mdrun.out`, `<stage>.log`, `<stage>.grompp.out`), extracts the
+GROMACS error message and classifies it, e.g. `LINCS`, `LINCS, then
+non-finite energy`, `GPU`, `non-finite forces (pforce)`, `too many grompp
+warnings`, `atoms moved too far`, `out of memory`, `killed by signal 9` or
+`coordinate generation (polyply)`. LINCS warnings and large forces listed by
+`-pforce` before the error are added as notes. The reason is stored in the
+state file and shown at the end of `run`, by `status` and by `check`. `check`
+also reads the logs directly, so it gives reasons for older batches and for
+incomplete runs that crashed without the failure being recorded.
+
+`--details` adds one line per simulation with its progress and reason; `--list
+complete|incomplete|failed|not-started` prints just the names, e.g. to
+feed into `run --only`.
+
+## Analyses
+
+`analyze` runs a program (a GROMACS tool or anything else) in the directory
+of every simulation whose stage finished and collects the last data line of
+one of its output files into a table. Analyses are defined in the campaign
+file, so they can be imported like the rest of it:
+
+```yaml
+analyses:
+  - name: dG
+    stage: awh                          # default: the last stage
+    command: gmx awh -s awh.tpr -f awh.edr -o {tmpdir}/awh
+    output: "{tmpdir}/awh_t{end_time}.xvg"
+    columns: [lambda_state, PMF]        # optional, default: from the xvg legends
+```
+
+```bash
+martini_harness analyze campaigns/screen/campaign.yaml   # all analyses
+martini_harness analyze campaign.yaml --analysis dG --only row42_in_W
+```
+
+| key       | meaning                                                                      |
+|-----------|------------------------------------------------------------------------------|
+| `name`    | Analysis name; results go to `<output_dir>/<name>.tsv`                       |
+| `stage`   | Stage to analyse; simulations without `<stage>.gro` are skipped (default: last stage) |
+| `command` | Program and arguments, as a string (split like a shell command) or a list    |
+| `output`  | File, relative to the simulation directory, whose last data line is the result |
+| `stdin`   | Text sent to the program, e.g. a group selection for `gmx energy`            |
+| `columns` | Names of the result columns                                                  |
+
+`command`, `output` and `stdin` may use the matrix variables (`{target}`,
+`{solvent}`, ...) and:
+
+- `{stage}` and `{workdir}` (the simulation directory, where the command runs),
+- `{tmpdir}`, a scratch directory inside the simulation directory that is
+  removed afterwards, for tools like `gmx awh` that write one file per frame,
+- `{end_time}`, the simulated time of the stage in ps, `tinit + nsteps · dt`
+  from `<stage>_mdout.mdp`, formatted the way GROMACS names its files
+  (`10000`, `1e+06`). With the example above it selects the PMF written at
+  the end of the run, whose last line is the free energy at the last λ state.
+
+The table has one row per simulation: its name and variables, `status`
+(`ok`, `not-finished` or `failed`), the values of the last line and an
+`error` column. The program's output is saved to `<name>.analysis.out` in
+the simulation directory. `analyze` exits with code 1 if the analysis failed
+for any simulation.
 
 ## Development
 
@@ -270,6 +378,9 @@ martini_harness/
 ├── config.py       # YAML schema (pydantic) and loading
 ├── matrix.py       # build-matrix expansion
 ├── simulation.py   # simulations, steps, resume logic, campaign runner
+├── check.py        # production completion check (xvg last frame)
+├── analysis.py     # analysis programs run per simulation, results table
+├── diagnose.py     # failure reasons from GROMACS output
 ├── state.py        # per-simulation state file
 ├── backend.py      # polyply / GROMACS execution
 ├── mdp.py          # MDP rendering and templating

@@ -1,0 +1,23 @@
+                  :-) GROMACS - gmx mdrun, 2024.2-Homebrew (-:
+
+Executable:   /opt/homebrew/bin/../Cellar/gromacs/2024.2/bin/gmx
+Data prefix:  /opt/homebrew/bin/../Cellar/gromacs/2024.2
+Working dir:  /path/to/run
+Command line:
+  gmx mdrun -s /path/to/run -deffnm gpu -nb gpu
+
+Reading file /path/to/run VERSION 2024.2-Homebrew (single precision)
+
+-------------------------------------------------------
+Program:     gmx mdrun, version 2024.2-Homebrew
+Source file: src/gromacs/taskassignment/decidegpuusage.cpp (line 333)
+Function:    bool gmx::decideWhetherToUseGpusForNonbonded(TaskTarget, const std::vector<int>&, EmulateGpuNonbonded, bool, bool, bool, bool)
+
+Inconsistency in user input:
+Nonbonded interactions on the GPU were requested with -nb gpu, but the GROMACS
+binary has been built without GPU support. Either run without selecting GPU
+options, or recompile GROMACS with GPU support enabled
+
+For more information and tips for troubleshooting, please check the GROMACS
+website at https://manual.gromacs.org/current/user-guide/run-time-errors.html
+-------------------------------------------------------

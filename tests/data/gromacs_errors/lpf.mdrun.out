@@ -1,0 +1,100 @@
+.761  force  8.18503e+07
+
+Step 1, time 0.2 (ps)  LINCS WARNING
+relative constraint deviation after LINCS:
+rms 0.334813, max 0.668412 (between atoms 6 and 8)
+bonds that rotated more than 30 degrees:
+ atom 1 atom 2  angle  previous, current, constraint length
+      1      2   34.2    0.3397   0.3310      0.3270
+      1      4   55.9    0.2659   0.2799      0.2560
+      2      5   33.6    0.4905   0.4745      0.4720
+      4      5   57.6    0.2900   0.2946      0.2790
+      4      5   57.6    0.2900   0.2946      0.2790
+      4      5   57.6    0.2900   0.2946      0.2790
+      4      5   57.6    0.2900   0.2946      0.2790
+      6      7   48.2    0.3132   0.2354      0.3020
+      6      8  126.8    0.2692   0.4321      0.2590
+      7      8   80.4    0.3031   0.4725      0.2910
+      7      8   80.4    0.3031   0.4725      0.2910
+
+Back Off! I just backed up step1b.pdb to ./#step1b.pdb.1#
+
+Back Off! I just backed up step1c.pdb to ./#step1c.pdb.1#
+Wrote pdb files with previous and current coordinates
+step 2 atom     13  x    1.874    0.888    2.749  force  3.33149e+06
+step 2 atom     18  x    2.469    2.715    1.941  force  1.00068e+06
+step 2 atom     25  x    2.935    1.628    2.414  force  5.69702e+06
+step 2 atom     29  x    1.646    1.716    0.354  force  1.93142e+06
+step 2 atom     36  x    3.006    2.034    0.472  force  5.20394e+06
+step 2 atom     38  x    2.692    2.591    1.889  force  1.00258e+06
+step 2 atom     46  x    2.191    0.749    3.077  force  9.84329e+06
+step 2 atom     49  x    0.033    2.027    1.493  force  1.66763e+06
+step 2 atom     53  x    1.284    3.168    1.125  force  1.95370e+06
+step 2 atom     54  x    0.373    0.350   -0.122  force  6.23322e+09
+step 2 atom     56  x    2.983    1.030    0.880  force  4.67737e+07
+step 2 atom     60  x    0.322    1.319    0.119  force  1.25453e+06
+step 2 atom     66  x    3.335    2.327    3.047  force  1.00820e+06
+step 2 atom     68  x    2.989    1.327    1.035  force  5.72713e+07
+step 2 atom     72  x    0.338    0.469    3.192  force  2.87327e+10
+step 2 atom     83  x    1.688    3.040    2.104  force  2.50800e+08
+step 2 atom     88  x    0.268    0.400   -0.187  force  2.90841e+10
+step 2 atom     90  x    0.191    2.771    2.726  force  1.57039e+06
+step 2 atom     91  x    3.390    1.456    1.974  force  1.38686e+06
+step 2 atom     95  x    1.411    1.788    0.307  force  3.51987e+09
+step 2 atom    101  x    1.780    1.090    3.316  force  3.23534e+06
+step 2 atom    104  x    0.442    3.825    1.097  force  4.15062e+11
+step 2 atom    121  x    0.215    1.600    3.105  force  4.30032e+08
+step 2 atom    129  x    2.047    0.363    2.954  force  2.89470e+06
+step 2 atom    134  x    2.797    1.851   -0.373  force  9.00466e+09
+step 2 atom    137  x    0.097    1.678    2.029  force          inf
+step 2 atom    140  x    1.036    0.144    2.574  force  1.43426e+06
+step 2 atom    141  x    1.969    3.260    2.022  force  1.98860e+06
+step 2 atom    147  x    0.454    0.316    1.170  force  4.15062e+11
+step 2 atom    152  x    0.662    3.085    0.755  force  8.79296e+08
+step 2 atom    153  x    0.349    1.238    0.361  force  1.25632e+06
+step 2 atom    163  x    2.707    2.649    0.353  force  1.52183e+08
+step 2 atom    165  x    3.403    0.238    1.197  force  1.25349e+08
+step 2 atom    187  x   -0.152    1.953    1.645  force  1.56567e+06
+step 2 atom    188  x    1.585    1.034    3.442  force  3.23525e+06
+step 2 atom    189  x    1.054   -0.027    2.761  force  1.43380e+06
+step 2 atom    191  x    3.523    1.674    2.031  force          inf
+step 2 atom    197  x    0.592    2.975    0.671  force  8.79295e+08
+step 2 atom    199  x    1.525    2.996    2.122  force  2.51166e+08
+step 2 atom    206  x    1.670    1.006    2.774  force  3.26859e+06
+step 2 atom    209  x   -0.084    0.161    1.039  force  1.25349e+08
+step 2 atom    213  x    2.436    0.757    3.109  force  2.06208e+06
+step 2 atom    219  x    2.644    2.676    0.063  force  1.33481e+09
+step 2 atom    221  x   -0.544    1.921   -0.346  force  9.00466e+09
+step 2 atom    223  x    2.588    2.621    3.382  force  1.33496e+09
+step 2 atom    231  x    3.587    1.463    3.055  force  4.30034e+08
+step 2 atom    232  x    1.262    3.253    2.562  force  1.05646e+08
+step 2 atom    235  x    3.061    1.206    0.905  force  5.23134e+07
+step 2 atom    246  x    2.602    0.109    0.701  force  1.21880e+06
+step 2 atom    251  x    0.174    2.775    2.475  force  1.57339e+06
+step 2 atom    255  x    1.509    3.081    2.655  force  2.43544e+08
+step 2 atom    260  x    1.999    2.535    0.351  force  5.25275e+06
+step 2 atom    261  x    1.928    3.120    2.221  force  1.74142e+06
+step 2 atom    263  x    2.610    2.224    2.293  force  2.28179e+09
+step 2 atom    265  x    3.053    1.467    2.526  force  5.70165e+06
+step 2 atom    271  x    2.519    2.327    2.251  force  2.28179e+09
+step 2 atom    272  x    0.197    2.757    0.701  force  1.01794e+06
+step 2 atom    273  x    1.348    3.097    2.600  force  2.00077e+08
+step 2 atom    275  x    2.687   -0.057    0.524  force  1.20965e+06
+step 2 atom    276  x   -0.029    2.564    2.979  force  1.00280e+06
+step 2 atom    282  x    1.239    3.404    1.184  force  1.31273e+06
+step 2 atom    286  x    2.867    2.649    0.431  force  1.52295e+08
+step 2 atom    289  x    2.054    0.583   -0.394  force  9.07515e+06
+step 2 atom    302  x    1.933    2.501    0.134  force  5.25810e+06
+step 2 atom    305  x    1.380    1.783    3.889  force  3.52003e+09
+step 2 atom    308  x    2.836    2.073    0.620  force  5.20380e+06
+
+-------------------------------------------------------
+Program:     gmx mdrun, version 2024.2-Homebrew
+Source file: src/gromacs/mdlib/sim_util.cpp (line 297)
+
+Fatal error:
+At step 2 detected non-finite forces on 2 atoms
+
+For more information and tips for troubleshooting, please check the GROMACS
+website at https://manual.gromacs.org/current/user-guide/run-time-errors.html
+-------------------------------------------------------

@@ -9,8 +9,17 @@ import sys
 import time
 from pathlib import Path
 
+from .analysis import FAILED as ANALYSIS_FAILED
+from .analysis import NOT_FINISHED, OK, run_analyses, write_table
+from .check import CATEGORIES, check_production, summarize
 from .config import ConfigError, load_campaign
-from .library import LibraryError, MoleculeLibrary, sample_molecules, split_itp
+from .library import (
+    LibraryError,
+    MoleculeLibrary,
+    sample_molecules,
+    sample_per_group,
+    split_itp,
+)
 from .simulation import (
     STATUS_DONE,
     STATUS_FAILED,
@@ -52,7 +61,7 @@ def print_status(simulations: list[Simulation]) -> None:
         print(f"{sim.name:<{width}}  {steps}")
         for s in statuses:
             if s.status == STATUS_FAILED and s.error:
-                print(f"{'':<{width}}    {s.name} error: {s.error}")
+                print(f"{'':<{width}}    {s.name} error: {s.reason or s.error}")
     print(f"\nOutput directory: {simulations[0].spec.workdir.parent}")
 
 
@@ -70,13 +79,94 @@ def cmd_run(args: argparse.Namespace) -> int:
     failed = [o for o in outcomes if not o.success]
     logger.info("Campaign finished: %d/%d simulations succeeded", len(outcomes) - len(failed), len(outcomes))
     for outcome in failed:
-        logger.error("  %s failed at %s: %s", outcome.name, outcome.failed, outcome.error)
+        logger.error(
+            "  %s failed at %s: %s", outcome.name, outcome.failed, outcome.reason or outcome.error
+        )
     return 1 if failed else 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     print_status(_load_simulations(args))
     return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    config = load_campaign(args.config)
+    stage = args.stage or config.stages[-1].name
+    if stage not in {s.name for s in config.stages}:
+        raise ConfigError(
+            f"no stage named {stage!r} (stages: {', '.join(s.name for s in config.stages)})"
+        )
+    simulations = build_simulations(config, output_dir=args.output_dir)
+    if args.only:
+        simulations = select_simulations(simulations, args.only)
+
+    nsteps = config.mdrun.get("nsteps")
+    checks = [
+        check_production(sim, stage, int(nsteps) if nsteps is not None else None)
+        for sim in simulations
+    ]
+    if args.list:
+        for check in checks:
+            if check.category == args.list:
+                print(check.name)
+        return 0
+
+    print(summarize(checks, stage))
+    if args.details:
+        print()
+        width = max((len(c.name) for c in checks), default=0)
+        for check in checks:
+            progress = f"{100 * check.progress:5.1f}%" if check.progress is not None else "    -"
+            extra = {"failed": f"at {check.failed_step}", "not-started": f"next: {check.next_step}"}.get(
+                check.category, ""
+            )
+            if check.diagnosis is not None:
+                extra = f"{extra}  {check.diagnosis}".strip()
+            elif check.category == "failed" and check.error:
+                extra = f"{extra}  {check.error}"
+            if len(extra) > 160:
+                extra = extra[:157] + "..."
+            print(f"{check.name:<{width}}  {check.category:<11}  {progress}  {extra}")
+    return 0
+
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    config = load_campaign(args.config)
+    analyses = config.analyses
+    if not analyses:
+        raise ConfigError(f"{args.config}: no analyses defined (add an `analyses` section)")
+    if args.analysis:
+        known = {a.name for a in analyses}
+        unknown = [name for name in args.analysis if name not in known]
+        if unknown:
+            raise ConfigError(
+                f"unknown analysis(es): {', '.join(unknown)}; available: {', '.join(sorted(known))}"
+            )
+        analyses = [a for a in analyses if a.name in args.analysis]
+    simulations = build_simulations(config, output_dir=args.output_dir)
+    if args.only:
+        simulations = select_simulations(simulations, args.only)
+    output_dir = args.output_dir.resolve() if args.output_dir else config.output_dir
+
+    nsteps = config.mdrun.get("nsteps")
+    any_failed = False
+    for analysis in analyses:
+        logger.info("Running %s on %d simulation(s)", analysis.name, len(simulations))
+        results = run_analyses(analysis, simulations, int(nsteps) if nsteps is not None else None)
+        table = output_dir / f"{analysis.name}.tsv"
+        write_table(table, simulations, results)
+        counts = {
+            status: sum(r.status == status for r in results)
+            for status in (OK, NOT_FINISHED, ANALYSIS_FAILED)
+        }
+        logger.info(
+            "%s: %d ok, %d with %s not finished, %d failed -> %s",
+            analysis.name, counts[OK], counts[NOT_FINISHED], analysis.stage,
+            counts[ANALYSIS_FAILED], table,
+        )
+        any_failed |= counts[ANALYSIS_FAILED] > 0
+    return 1 if any_failed else 0
 
 
 def cmd_list_molecules(args: argparse.Namespace) -> int:
@@ -106,13 +196,19 @@ def cmd_split_itp(args: argparse.Namespace) -> int:
 def cmd_sample(args: argparse.Namespace) -> int:
     library = MoleculeLibrary(args.library)
     seed = args.seed if args.seed is not None else random.SystemRandom().randrange(2**31)
-    names = sample_molecules(library, args.n, seed)
+    if args.per_group is not None:
+        names, sizes = sample_per_group(library, args.per_group, seed)
+        how = f"{args.per_group} from each of {len(sizes)} groups"
+        logger.info("Group sizes: %s", ", ".join(f"{g}: {n}" for g, n in sizes.items()))
+    else:
+        names = sample_molecules(library, args.n, seed)
+        how = "uniformly"
 
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     library_path = os.path.relpath(library.library_dir.resolve(), output.parent)
     lines = [
-        f"# {len(names)} of {len(library)} molecules sampled from {library_path} (seed {seed}).",
+        f"# {len(names)} of {len(library)} molecules sampled {how} from {library_path} (seed {seed}).",
         "# Import this file from a campaign: `imports: [" + output.name + "]`.",
         f"molecule_library: {json.dumps(library_path)}",
         "matrix:",
@@ -156,6 +252,35 @@ def build_parser() -> argparse.ArgumentParser:
     add_campaign_args(status_parser)
     status_parser.set_defaults(func=cmd_status)
 
+    check_parser = subparsers.add_parser(
+        "check",
+        help="count simulations whose production stage finished (last xvg frame written)",
+    )
+    add_campaign_args(check_parser)
+    check_parser.add_argument(
+        "--stage", help="production stage to check (default: the last stage)"
+    )
+    output = check_parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--list", choices=CATEGORIES,
+        help="only print the names of simulations in this category, one per line",
+    )
+    output.add_argument(
+        "--details", action="store_true", help="also print one line per simulation"
+    )
+    check_parser.set_defaults(func=cmd_check)
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="run the campaign's analyses on every finished simulation and tabulate the results",
+    )
+    add_campaign_args(analyze_parser)
+    analyze_parser.add_argument(
+        "--analysis", action="append", metavar="NAME",
+        help="run only this analysis (repeatable; default: all)",
+    )
+    analyze_parser.set_defaults(func=cmd_analyze)
+
     list_parser = subparsers.add_parser(
         "list-molecules", help="list the molecule types defined in ITP files"
     )
@@ -174,7 +299,13 @@ def build_parser() -> argparse.ArgumentParser:
         "sample", help="randomly pick molecules from a library into an importable YAML file"
     )
     sample_parser.add_argument("library", type=Path, help="library directory from split-itp")
-    sample_parser.add_argument("-n", type=int, required=True, help="number of molecules")
+    how_many = sample_parser.add_mutually_exclusive_group(required=True)
+    how_many.add_argument("-n", type=int, help="number of molecules, drawn uniformly")
+    how_many.add_argument(
+        "--per-group", type=int, metavar="K",
+        help="draw K molecules from every group; the group is the name part before the "
+        "first '_' (e.g. the length in <length>_<molid>)",
+    )
     sample_parser.add_argument("--seed", type=int, help="random seed (default: random, recorded in the file)")
     sample_parser.add_argument("-o", "--output", type=Path, required=True, help="YAML file to write")
     sample_parser.set_defaults(func=cmd_sample)
