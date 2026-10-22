@@ -60,6 +60,15 @@ def last_xvg_time(path: Path) -> float | None:
     Only the end of the file is read. A partially written last line (from a
     run that is still writing or was killed) is ignored.
     """
+    row = last_xvg_row(path)
+    return float(row[0]) if row is not None else None
+
+
+def last_xvg_row(path: Path) -> list[str] | None:
+    """Fields of the last complete data line of an xvg file whose first field is a number.
+
+    Only the end of the file is read. A partially written last line is ignored.
+    """
     try:
         with open(path, "rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -78,17 +87,27 @@ def last_xvg_time(path: Path) -> float | None:
     if not tail.endswith("\n") and lines:
         lines = lines[:-1]  # still being written
     for line in reversed(lines):
+        fields = line.split()
         try:
-            return float(line.split()[0])
+            float(fields[0])
         except ValueError:
             continue
+        return fields
     return None
 
 
-def expected_end_time(mdp_text: str, nsteps_override: int | None = None) -> float | None:
-    """Time of the last dH/dλ frame a run with these MDP settings writes.
+def expected_end_time(
+    mdp_text: str, nsteps_override: int | None = None, interval: str | None = "nstdhdl"
+) -> float | None:
+    """Time of the last frame a run with these MDP settings writes.
 
-    Returns None if it cannot be known (infinite run or no dH/dλ output).
+    Args:
+        mdp_text: The MDP settings of the run.
+        nsteps_override: ``nsteps`` given to mdrun, if any.
+        interval: MDP parameter with the output interval in steps (default:
+            the dH/dλ output); None for the time of the last step.
+
+    Returns None if it cannot be known (infinite run or no output).
     """
 
     def value(key: str) -> str:
@@ -97,12 +116,29 @@ def expected_end_time(mdp_text: str, nsteps_override: int | None = None) -> floa
     try:
         tinit, dt = float(value("tinit")), float(value("dt"))
         nsteps = int(nsteps_override if nsteps_override is not None else value("nsteps"))
-        nstdhdl = int(value("nstdhdl"))
+        every = int(value(interval)) if interval is not None else 1
     except ValueError:
         return None
-    if nsteps < 0 or nstdhdl <= 0:
+    if nsteps < 0 or every <= 0:
         return None
-    return tinit + (nsteps // nstdhdl) * nstdhdl * dt
+    return tinit + (nsteps // every) * every * dt
+
+
+def stage_run_settings(
+    simulation: Simulation, stage: str, nsteps_override: int | None = None
+) -> tuple[str, int | None]:
+    """MDP text and mdrun ``-nsteps`` of a stage as it was (or will be) run.
+
+    The ``<stage>_mdout.mdp`` written by grompp is preferred over the
+    rendered MDP; a stage's own ``nsteps`` mdrun flag beats ``nsteps_override``
+    (the campaign-wide one).
+    """
+    mdout = simulation.spec.workdir / f"{stage}_mdout.mdp"
+    step = next(step for step in simulation.steps if step.name == stage)
+    mdp_text = mdout.read_text() if mdout.is_file() else step.signature["mdp"]
+    if "nsteps" in step.signature["mdrun"]:
+        nsteps_override = int(step.signature["mdrun"]["nsteps"])
+    return mdp_text, nsteps_override
 
 
 def check_production(simulation: Simulation, stage: str, nsteps_override: int | None = None) -> ProductionCheck:
@@ -110,12 +146,7 @@ def check_production(simulation: Simulation, stage: str, nsteps_override: int | 
     workdir = simulation.spec.workdir
     check = ProductionCheck(simulation.name, NOT_STARTED)
 
-    mdout = workdir / f"{stage}_mdout.mdp"
-    step = next(step for step in simulation.steps if step.name == stage)
-    mdp_text = mdout.read_text() if mdout.is_file() else step.signature["mdp"]
-    if nsteps_override is None and "nsteps" in step.signature["mdrun"]:
-        nsteps_override = int(step.signature["mdrun"]["nsteps"])
-    check.end_time = expected_end_time(mdp_text, nsteps_override)
+    check.end_time = expected_end_time(*stage_run_settings(simulation, stage, nsteps_override))
 
     xvg = workdir / f"{stage}.xvg"
     if xvg.is_file():

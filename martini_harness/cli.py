@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from .analysis import FAILED as ANALYSIS_FAILED
+from .analysis import NOT_FINISHED, OK, run_analyses, write_table
 from .check import CATEGORIES, check_production, summarize
 from .config import ConfigError, load_campaign
 from .library import (
@@ -129,6 +131,44 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    config = load_campaign(args.config)
+    analyses = config.analyses
+    if not analyses:
+        raise ConfigError(f"{args.config}: no analyses defined (add an `analyses` section)")
+    if args.analysis:
+        known = {a.name for a in analyses}
+        unknown = [name for name in args.analysis if name not in known]
+        if unknown:
+            raise ConfigError(
+                f"unknown analysis(es): {', '.join(unknown)}; available: {', '.join(sorted(known))}"
+            )
+        analyses = [a for a in analyses if a.name in args.analysis]
+    simulations = build_simulations(config, output_dir=args.output_dir)
+    if args.only:
+        simulations = select_simulations(simulations, args.only)
+    output_dir = args.output_dir.resolve() if args.output_dir else config.output_dir
+
+    nsteps = config.mdrun.get("nsteps")
+    any_failed = False
+    for analysis in analyses:
+        logger.info("Running %s on %d simulation(s)", analysis.name, len(simulations))
+        results = run_analyses(analysis, simulations, int(nsteps) if nsteps is not None else None)
+        table = output_dir / f"{analysis.name}.tsv"
+        write_table(table, simulations, results)
+        counts = {
+            status: sum(r.status == status for r in results)
+            for status in (OK, NOT_FINISHED, ANALYSIS_FAILED)
+        }
+        logger.info(
+            "%s: %d ok, %d with %s not finished, %d failed -> %s",
+            analysis.name, counts[OK], counts[NOT_FINISHED], analysis.stage,
+            counts[ANALYSIS_FAILED], table,
+        )
+        any_failed |= counts[ANALYSIS_FAILED] > 0
+    return 1 if any_failed else 0
+
+
 def cmd_list_molecules(args: argparse.Namespace) -> int:
     for itp in args.itp_files:
         for name in read_moleculetypes(itp):
@@ -229,6 +269,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--details", action="store_true", help="also print one line per simulation"
     )
     check_parser.set_defaults(func=cmd_check)
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="run the campaign's analyses on every finished simulation and tabulate the results",
+    )
+    add_campaign_args(analyze_parser)
+    analyze_parser.add_argument(
+        "--analysis", action="append", metavar="NAME",
+        help="run only this analysis (repeatable; default: all)",
+    )
+    analyze_parser.set_defaults(func=cmd_analyze)
 
     list_parser = subparsers.add_parser(
         "list-molecules", help="list the molecule types defined in ITP files"

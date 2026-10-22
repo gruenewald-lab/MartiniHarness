@@ -27,6 +27,7 @@ martini_harness run examples/sample_campaign.yaml --dry-run   # show what would 
 martini_harness run examples/sample_campaign.yaml             # run / resume
 martini_harness status examples/sample_campaign.yaml          # progress per step
 martini_harness check examples/sample_campaign.yaml           # how many production runs finished
+martini_harness analyze examples/sample_campaign.yaml         # run analyses, tabulate results
 martini_harness list-molecules examples/row42.itp             # molecule types in ITPs
 martini_harness split-itp big.itp -o library/                  # one ITP per molecule
 martini_harness sample library/ -n 500 --seed 1 -o targets.yaml  # random subset
@@ -312,6 +313,53 @@ incomplete runs that crashed without the failure being recorded.
 complete|incomplete|failed|not-started` prints just the names, e.g. to
 feed into `run --only`.
 
+## Analyses
+
+`analyze` runs a program (a GROMACS tool or anything else) in the directory
+of every simulation whose stage finished and collects the last data line of
+one of its output files into a table. Analyses are defined in the campaign
+file, so they can be imported like the rest of it:
+
+```yaml
+analyses:
+  - name: dG
+    stage: awh                          # default: the last stage
+    command: gmx awh -s awh.tpr -f awh.edr -o {tmpdir}/awh
+    output: "{tmpdir}/awh_t{end_time}.xvg"
+    columns: [lambda_state, PMF]        # optional, default: from the xvg legends
+```
+
+```bash
+martini_harness analyze campaigns/screen/campaign.yaml   # all analyses
+martini_harness analyze campaign.yaml --analysis dG --only row42_in_W
+```
+
+| key       | meaning                                                                      |
+|-----------|------------------------------------------------------------------------------|
+| `name`    | Analysis name; results go to `<output_dir>/<name>.tsv`                       |
+| `stage`   | Stage to analyse; simulations without `<stage>.gro` are skipped (default: last stage) |
+| `command` | Program and arguments, as a string (split like a shell command) or a list    |
+| `output`  | File, relative to the simulation directory, whose last data line is the result |
+| `stdin`   | Text sent to the program, e.g. a group selection for `gmx energy`            |
+| `columns` | Names of the result columns                                                  |
+
+`command`, `output` and `stdin` may use the matrix variables (`{target}`,
+`{solvent}`, ...) and:
+
+- `{stage}` and `{workdir}` (the simulation directory, where the command runs),
+- `{tmpdir}`, a scratch directory inside the simulation directory that is
+  removed afterwards, for tools like `gmx awh` that write one file per frame,
+- `{end_time}`, the simulated time of the stage in ps, `tinit + nsteps · dt`
+  from `<stage>_mdout.mdp`, formatted the way GROMACS names its files
+  (`10000`, `1e+06`). With the example above it selects the PMF written at
+  the end of the run, whose last line is the free energy at the last λ state.
+
+The table has one row per simulation: its name and variables, `status`
+(`ok`, `not-finished` or `failed`), the values of the last line and an
+`error` column. The program's output is saved to `<name>.analysis.out` in
+the simulation directory. `analyze` exits with code 1 if the analysis failed
+for any simulation.
+
 ## Development
 
 ```bash
@@ -331,6 +379,7 @@ martini_harness/
 ├── matrix.py       # build-matrix expansion
 ├── simulation.py   # simulations, steps, resume logic, campaign runner
 ├── check.py        # production completion check (xvg last frame)
+├── analysis.py     # analysis programs run per simulation, results table
 ├── diagnose.py     # failure reasons from GROMACS output
 ├── state.py        # per-simulation state file
 ├── backend.py      # polyply / GROMACS execution
