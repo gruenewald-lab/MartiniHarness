@@ -13,7 +13,7 @@ Paths in an imported file are resolved against that file's directory.
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -91,8 +91,9 @@ class AnalysisConfig(_Model):
 
     ``command``, ``output`` and ``stdin`` may reference matrix variables plus
     ``{stage}``, ``{workdir}``, ``{tmpdir}`` (a scratch directory inside the
-    simulation directory, where the command runs; removed afterwards) and ``{end_time}`` (simulated time of the stage in ps,
-    formatted like GROMACS file names, e.g. ``10000``).
+    simulation directory, where the command runs; removed afterwards) and
+    ``{end_time}`` (simulated time of the stage in ps, formatted like GROMACS
+    file names, e.g. ``10000``).
     """
 
     name: str
@@ -101,14 +102,27 @@ class AnalysisConfig(_Model):
         description="Program and arguments; a string is split like a shell command line."
     )
     output: str = Field(
-        description="File (relative to the simulation directory) whose last data line is the result."
+        description="File (relative to the simulation directory) whose data lines give the result."
+    )
+    result: Literal["last", "first-last", "last-first"] = Field(
+        default="last",
+        description=(
+            "'last': all columns of the last data line. 'first-last' / 'last-first': the signed "
+            "difference of one column between the first and the last data line."
+        ),
+    )
+    column: int = Field(
+        default=1, ge=0, description="Column (0 = x) the difference is taken of; first-last/last-first only."
     )
     stdin: str | None = Field(
         default=None, description="Text sent to the program's standard input, e.g. a group selection."
     )
     columns: list[str] = Field(
         default_factory=list,
-        description="Names of the result columns (default: taken from the xvg legends).",
+        description=(
+            "Names of the result columns (default: the xvg legends). A difference has one "
+            "column, named like the analysis by default."
+        ),
     )
 
     @field_validator("name")
@@ -117,6 +131,12 @@ class AnalysisConfig(_Model):
         if not SAFE_NAME.match(name):
             raise ValueError(f"analysis name {name!r} may only contain letters, digits and ._+-")
         return name
+
+    @model_validator(mode="after")
+    def _check_columns(self) -> "AnalysisConfig":
+        if self.result != "last" and len(self.columns) > 1:
+            raise ValueError(f"analysis {self.name!r}: a {self.result} difference has a single column name")
+        return self
 
 
 class SimulationDefaults(_Model):

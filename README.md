@@ -316,8 +316,9 @@ feed into `run --only`.
 ## Analyses
 
 `analyze` runs a program (a GROMACS tool or anything else) in the directory
-of every simulation whose stage finished and collects the last data line of
-one of its output files into a table. Analyses are defined in the campaign
+of every simulation whose stage finished and collects a result from one of
+its output files into a table: the last data line, or the signed difference
+between the first and the last line. Analyses are defined in the campaign
 file, so they can be imported like the rest of it:
 
 ```yaml
@@ -326,7 +327,8 @@ analyses:
     stage: awh                          # default: the last stage
     command: gmx awh -s awh.tpr -f awh.edr -o {tmpdir}/awh
     output: "{tmpdir}/awh_t{end_time}.xvg"
-    columns: [lambda_state, PMF]        # optional, default: from the xvg legends
+    result: first-last                  # PMF(first λ state) - PMF(last λ state)
+    columns: [dG_solv]
 ```
 
 ```bash
@@ -339,9 +341,11 @@ martini_harness analyze campaign.yaml --analysis dG --only row42_in_W
 | `name`    | Analysis name; results go to `<output_dir>/<name>.tsv`                       |
 | `stage`   | Stage to analyse; simulations without `<stage>.gro` are skipped (default: last stage) |
 | `command` | Program and arguments, as a string (split like a shell command) or a list    |
-| `output`  | File, relative to the simulation directory, whose last data line is the result |
+| `output`  | File, relative to the simulation directory, that holds the result          |
+| `result`  | `last` (default): all columns of the last data line. `first-last` / `last-first`: signed difference of one column between the first and the last data line |
+| `column`  | Column the difference is taken of (0 = x; default 1, the first y column)     |
 | `stdin`   | Text sent to the program, e.g. a group selection for `gmx energy`            |
-| `columns` | Names of the result columns                                                  |
+| `columns` | Names of the result columns; a difference has one (default: the analysis name) |
 
 `command`, `output` and `stdin` may use the matrix variables (`{target}`,
 `{solvent}`, ...) and:
@@ -352,10 +356,19 @@ martini_harness analyze campaign.yaml --analysis dG --only row42_in_W
 - `{end_time}`, the simulated time of the stage in ps, `tinit + nsteps · dt`
   from `<stage>_mdout.mdp`, formatted the way GROMACS names its files
   (`10000`, `1e+06`). With the example above it selects the PMF written at
-  the end of the run, whose last line is the free energy at the last λ state.
+  the end of the run.
+
+**Free energy from AWH.** `gmx awh` normalises the PMF so that its minimum is
+0, so the last value alone is not the free energy. The solvation free energy
+is the PMF of the coupled state minus that of the decoupled state. In the
+default `awh.mdp`, `vdw_lambdas` runs from 1 (state 0, coupled) to 0 (last
+state, decoupled), so `result: first-last` gives ΔG_solv in kJ/mol. For λ
+values that run from 0 (decoupled) to 1 (coupled), as in the GROMACS
+solvation tutorial, use `last-first`. The difference is formatted with 6
+significant digits.
 
 The table has one row per simulation: its name and variables, `status`
-(`ok`, `not-finished` or `failed`), the values of the last line and an
+(`ok`, `not-finished` or `failed`), the result values and an
 `error` column. The program's output is saved to `<name>.analysis.out` in
 the simulation directory. `analyze` exits with code 1 if the analysis failed
 for any simulation.

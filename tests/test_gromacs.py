@@ -1,6 +1,7 @@
 """End-to-end run with real polyply and GROMACS on a tiny system."""
 
 import shutil
+import subprocess
 
 import pytest
 
@@ -51,3 +52,21 @@ def test_short_campaign_runs_and_resumes(campaign_file, tmp_path):
     assert result.status == OK, result.error
     assert float(result.values["(nm, deg or lambda state)"]) == 20
     assert "PMF" in result.values
+
+    # The free energy is PMF(first state, coupled) - PMF(last state), not the last value.
+    delta = analysis.model_copy(update={"result": "first-last", "columns": ["dG_solv"]})
+    simulation = build_simulations(load_campaign(path))[0]
+    result = run_analysis(delta, simulation)
+    assert result.status == OK, result.error
+    xvg = simulation.spec.workdir / "rerun"
+    xvg.mkdir()
+    subprocess.run(
+        ["gmx", "awh", "-quiet", "-s", "awh.tpr", "-f", "awh.edr", "-o", "rerun/awh"],
+        cwd=simulation.spec.workdir, check=True, capture_output=True,
+    )
+    rows = [
+        line.split() for line in (xvg / "awh_t1.xvg").read_text().splitlines()
+        if line.strip() and line[0] not in "#@"
+    ]
+    expected = float(rows[0][1]) - float(rows[-1][1])
+    assert float(result.values["dG_solv"]) == pytest.approx(expected, abs=1e-4)

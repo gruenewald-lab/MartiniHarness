@@ -2,8 +2,10 @@
 
 An analysis runs a command (a GROMACS tool such as ``gmx awh`` or any other
 program) inside the directory of each simulation whose stage finished, then
-takes the last data line of one output file as that simulation's result. The
-results of all simulations are collected into one table.
+takes the last data line of one output file as that simulation's result, or the
+signed difference of one column between its first and last data line (e.g. the
+free energy difference of an AWH PMF). The results of all simulations are
+collected into one table.
 """
 
 import csv
@@ -16,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .check import expected_end_time, last_xvg_row, stage_run_settings
+from .check import expected_end_time, first_xvg_row, last_xvg_row, stage_run_settings
 from .config import AnalysisConfig
 from .mdp import TemplateError, render_value
 from .simulation import Simulation
@@ -84,16 +86,34 @@ def run_analysis(
             if process.returncode != 0:
                 raise AnalysisError(f"{argv[0]} exited with code {process.returncode}; see {log}")
 
-            row = last_xvg_row(output) if output.is_file() else None
-            if row is None:
+            last = last_xvg_row(output) if output.is_file() else None
+            if last is None:
                 found = "not written" if not output.exists() else "has no data lines"
                 raise AnalysisError(f"output {output_name} {found}; see {log}")
-            names = analysis.columns or _xvg_column_names(output)
+            if analysis.result == "last":
+                names = analysis.columns or _xvg_column_names(output)
+                values = {
+                    names[index] if index < len(names) else f"col{index}": text
+                    for index, text in enumerate(last)
+                }
+            else:
+                values = {
+                    (analysis.columns or [analysis.name])[0]: _difference(analysis, output, last)
+                }
     except (AnalysisError, TemplateError) as exc:
         return AnalysisResult(simulation.name, FAILED, error=str(exc))
-
-    values = {names[index] if index < len(names) else f"col{index}": text for index, text in enumerate(row)}
     return AnalysisResult(simulation.name, OK, values)
+
+
+def _difference(analysis: AnalysisConfig, output: Path, last: list[str]) -> str:
+    """Signed difference of ``analysis.column`` between the first and the last data line."""
+    first = first_xvg_row(output)
+    try:
+        first_value, last_value = float(first[analysis.column]), float(last[analysis.column])
+    except (IndexError, ValueError, TypeError) as exc:
+        raise AnalysisError(f"{output.name} has no numeric column {analysis.column}") from exc
+    value = first_value - last_value if analysis.result == "first-last" else last_value - first_value
+    return f"{value:.6g}"
 
 
 def run_analyses(

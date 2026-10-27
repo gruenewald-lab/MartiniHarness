@@ -170,3 +170,33 @@ def test_end_time_uses_gromacs_number_format(campaign_file):
         name="t", command=["echo", "{end_time}"], output="t.analysis.out", stage="awh"
     )
     assert run_analysis(analysis, simulations[0]).values == {"x": "10000"}
+
+
+@pytest.mark.parametrize(
+    "result, column, expected",
+    [("first-last", 1, "-2"), ("last-first", 1, "2"), ("first-last", 0, "-20")],
+)
+def test_signed_difference_of_first_and_last_line(campaign_file, fake_awh, result, column, expected):
+    path = campaign_file(AWH_CAMPAIGN)
+    simulations = build_simulations(load_campaign(path))
+    run_campaign(simulations[:1], FakeBackend())
+    analysis = AnalysisConfig(
+        name="dG",
+        stage="awh",
+        command=fake_awh.split() + ["-o", "{tmpdir}/awh"],
+        output="{tmpdir}/awh_t{end_time}.xvg",  # PMF 0 ... 2 over lambda state 0 ... 20
+        result=result,
+        column=column,
+    )
+    assert run_analysis(analysis, simulations[0]).values == {"dG": expected}
+
+    named = analysis.model_copy(update={"columns": ["dG_solv"]})
+    assert run_analysis(named, simulations[0]).values == {"dG_solv": expected}
+
+    missing = analysis.model_copy(update={"column": 9})
+    assert "no numeric column 9" in run_analysis(missing, simulations[0]).error
+
+
+def test_difference_needs_one_column_name():
+    with pytest.raises(ValueError, match="single column name"):
+        AnalysisConfig(name="a", command="x", output="y", result="first-last", columns=["a", "b"])

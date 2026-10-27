@@ -66,12 +66,17 @@ stages:
       define: ""        # row42 has no TI-specific terms (awh.mdp sets -DTI)
 
 # Run with `martini_harness analyze`, in every simulation whose stage finished.
-# The last line of the output file is collected into <output_dir>/<name>.tsv.
+# The result of each simulation goes into <output_dir>/<name>.tsv.
 analyses:
   - name: dG
     stage: awh
     # {tmpdir} is a scratch directory; gmx awh writes awh_t<time>.xvg per frame.
     command: gmx awh -s awh.tpr -f awh.edr -o {tmpdir}/awh
-    # The PMF at the end of the run; its last line is the last lambda state.
+    # The PMF at the end of the run, one line per lambda state.
     output: "{tmpdir}/awh_t{end_time}.xvg"
-    columns: [lambda_state, PMF]
+    # Solvation free energy (kJ/mol) = PMF(coupled) - PMF(decoupled). The PMF is
+    # normalised to a minimum of 0, so the last value alone is not the free energy.
+    # In awh.mdp vdw_lambdas runs from 1 (state 0, coupled) to 0 (last state,
+    # decoupled), hence first - last. Use last-first if your lambdas run 0 -> 1.
+    result: first-last
+    columns: [dG_solv]

@@ -96,6 +96,23 @@ def last_xvg_row(path: Path) -> list[str] | None:
     return None
 
 
+def first_xvg_row(path: Path) -> list[str] | None:
+    """Fields of the first data line of an xvg file whose first field is a number."""
+    try:
+        with open(path, errors="replace") as handle:
+            for line in handle:
+                fields = line.split()
+                if fields and not line.lstrip().startswith(("#", "@")):
+                    try:
+                        float(fields[0])
+                    except ValueError:
+                        continue
+                    return fields
+    except OSError:
+        pass
+    return None
+
+
 def expected_end_time(
     mdp_text: str, nsteps_override: int | None = None, interval: str | None = "nstdhdl"
 ) -> float | None:
