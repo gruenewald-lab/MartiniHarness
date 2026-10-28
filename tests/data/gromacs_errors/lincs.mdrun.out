@@ -1,0 +1,114 @@
+Update groups can not be used for this system because an incompatible virtual site type is used
+
+Using 1 MPI thread
+Using 8 OpenMP threads 
+
+starting mdrun 'row42_in_W'
+2000 steps,    400.0 ps.
+
+Step 0  Warning: pressure scaling more than 1%, mu: 1.03918 1.03918 1.03918
+
+Step 1, time 0.2 (ps)  LINCS WARNING
+relative constraint deviation after LINCS:
+rms 0.334813, max 0.668412 (between atoms 6 and 8)
+bonds that rotated more than 30 degrees:
+ atom 1 atom 2  angle  previous, current, constraint length
+      1      2   34.2    0.3397   0.3310      0.3270
+      1      4   55.9    0.2659   0.2799      0.2560
+      2      5   33.6    0.4905   0.4745      0.4720
+      4      5   57.6    0.2900   0.2946      0.2790
+      4      5   57.6    0.2900   0.2946      0.2790
+      4      5   57.6    0.2900   0.2946      0.2790
+      4      5   57.6    0.2900   0.2946      0.2790
+      6      7   48.2    0.3132   0.2354      0.3020
+      6      8  126.8    0.2692   0.4321      0.2590
+      7      8   80.4    0.3031   0.4725      0.2910
+      7      8   80.4    0.3031   0.4725      0.2910
+Wrote pdb files with previous and current coordinates
+
+Step 2, time 0.4 (ps)  LINCS WARNING
+relative constraint deviation after LINCS:
+rms 495.387665, max 901.442139 (between atoms 1 and 2)
+bonds that rotated more than 30 degrees:
+ atom 1 atom 2  angle  previous, current, constraint length
+      1      2   71.2    0.3310 295.0986      0.3270
+      2      4  113.9    0.3590 295.6286      0.3550
+      2      5  150.5    0.4745 299.0477      0.4720
+      4      5  118.8    0.2946  13.5796      0.2790
+      4      5  118.8    0.2946  13.5796      0.2790
+      4      5  118.8    0.2946  13.5796      0.2790
+      4      5  118.8    0.2946  13.5796      0.2790
+      6      7   94.3    0.2354   0.6574      0.3020
+      6      8  126.4    0.4321  47.2870      0.2590
+      7      8  121.6    0.4725  44.8423      0.2910
+      7      8  121.6    0.4725  44.8423      0.2910
+Wrote pdb files with previous and current coordinates
+
+[... output trimmed ...]
+
+iclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+Warning: Only triclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+Warning: Only triclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+Warning: Only triclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+Warning: Only triclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+Warning: Only triclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+Warning: Only triclinic boxes with the first vector parallel to the x-axis and the second vector in the xy-plane are supported.
+         Box (3x3):
+            Box[    0]={         nan,          nan,          nan}
+            Box[    1]={         nan,          nan,          nan}
+            Box[    2]={         nan,          nan,          nan}
+         Can not fix pbc.
+
+
+-------------------------------------------------------
+Program:     gmx mdrun, version 2024.2-Homebrew
+Source file: src/gromacs/mdlib/sim_util.cpp (line 555)
+Function:    void checkPotentialEnergyValidity(int64_t, const gmx_enerdata_t&, const t_inputrec&)
+
+Internal error (bug):
+Step 100: The total potential energy is nan, which is not finite. The LJ and
+electrostatic contributions to the energy are 0 and 0, respectively. A
+non-finite potential energy can be caused by overlapping interactions in
+bonded interactions or very large or Nan coordinate values. Usually this is
+caused by a badly- or non-equilibrated initial configuration, incorrect
+interactions or parameters in the topology.
+
+For more information and tips for troubleshooting, please check the GROMACS
+website at https://manual.gromacs.org/current/user-guide/run-time-errors.html
+-------------------------------------------------------

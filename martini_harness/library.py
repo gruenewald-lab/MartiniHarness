@@ -218,3 +218,51 @@ def sample_molecules(library: MoleculeLibrary, n: int, seed: int) -> list[str]:
     names = library.names
     chosen = set(random.Random(seed).sample(names, n))
     return [name for name in names if name in chosen]
+
+
+GROUP_SEPARATOR = "_"
+
+
+def group_of(name: str) -> str:
+    """The group of a molecule: the part of its name before the first ``_``.
+
+    For names formatted ``<length>_<molid>`` this is the length.
+    """
+    group, separator, _ = name.partition(GROUP_SEPARATOR)
+    if not separator:
+        raise LibraryError(f"molecule {name!r} has no {GROUP_SEPARATOR!r} to take its group from")
+    return group
+
+
+def sample_per_group(
+    library: MoleculeLibrary, per_group: int, seed: int
+) -> tuple[list[str], dict[str, int]]:
+    """Pick ``per_group`` molecules at random from every group (see :func:`group_of`).
+
+    Returns:
+        The chosen names in library order, and the size of every group.
+
+    Raises:
+        LibraryError: If a name has no group or a group is smaller than ``per_group``.
+    """
+    if per_group < 1:
+        raise LibraryError("per_group must be at least 1")
+    groups: dict[str, list[str]] = {}
+    for name in library.names:
+        groups.setdefault(group_of(name), []).append(name)
+
+    sizes = {group: len(groups[group]) for group in sorted(groups, key=_group_sort_key)}
+    too_small = {group: size for group, size in sizes.items() if size < per_group}
+    if too_small:
+        listing = ", ".join(f"{group} ({size})" for group, size in too_small.items())
+        raise LibraryError(f"groups with fewer than {per_group} molecules: {listing}")
+
+    rng = random.Random(seed)
+    chosen: set[str] = set()
+    for group in sizes:  # fixed order keeps the result reproducible
+        chosen.update(rng.sample(groups[group], per_group))
+    return [name for name in library.names if name in chosen], sizes
+
+
+def _group_sort_key(group: str) -> tuple[bool, int, str]:
+    return (not group.isdigit(), int(group) if group.isdigit() else 0, group)

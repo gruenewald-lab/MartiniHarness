@@ -43,3 +43,33 @@ def render_topology(
     lines += ["", "[ system ]", system_name, "", "[ molecules ]"]
     lines += [f"{name:<10} {count}" for name, count in molecules]
     return "\n".join(lines) + "\n"
+
+
+def count_atoms(itp_file: str | Path, molecule: str) -> int | None:
+    """Number of ``[ atoms ]`` entries of ``molecule`` in an ITP file.
+
+    Returns None if the molecule is not defined in the file. Like
+    :func:`read_moleculetypes`, this does not evaluate preprocessor directives.
+    """
+    current = None
+    section = None
+    expect_name = False
+    count = None
+    for raw_line in Path(itp_file).read_text().splitlines():
+        line = raw_line.split(";", 1)[0].strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            section = line.strip("[] ").lower()
+            expect_name = section == "moleculetype"
+            if expect_name and current == molecule:
+                break  # the next molecule starts
+            continue
+        if expect_name:
+            current = line.split()[0]
+            expect_name = False
+            if current == molecule:
+                count = 0
+        elif current == molecule and section == "atoms":
+            count += 1
+    return count

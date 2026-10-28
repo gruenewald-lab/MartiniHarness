@@ -12,13 +12,19 @@ imports:
 title: Solvation campaign from shared files
 output_dir: ../campaigns/imports
 
+# Solvent mixtures, usable as a matrix `solvent`. Amounts are relative; the
+# n_solvent molecules are divided over the components. Wet octanol: 920 OCO
+# per 80 W, i.e. ~26 mol% water when one W stands for four water molecules.
+solvents:
+  wetOCO: {OCO: 920, W: 80}
+
 matrix:
   target: [row42]
-  solvent: [W, OCO, CLF]
+  solvent: [W, wetOCO, CLF]
   include:
     - solvent: W
       density: 997.0
-    - solvent: OCO
+    - solvent: wetOCO
       density: 827.0
     - solvent: CLF
       n_solvent: 6000

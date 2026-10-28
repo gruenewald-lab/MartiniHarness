@@ -1,0 +1,61 @@
+                 :-) GROMACS - gmx grompp, 2024.2-Homebrew (-:
+
+Executable:   /opt/homebrew/bin/../Cellar/gromacs/2024.2/bin/gmx
+Data prefix:  /opt/homebrew/bin/../Cellar/gromacs/2024.2
+Working dir:  /path/to/run
+Command line:
+  gmx grompp -f /path/to/run -c /path/to/run -p /path/to/run -o warn.tpr
+
+Replacing old mdp entry 'nstxtcout' by 'nstxout-compressed'
+
+NOTE 1 [file /path/to/run
+  verlet-buffer-pressure-tolerance is ignored when verlet-buffer-tolerance
+  < 0
+
+
+WARNING 1 [file /path/to/run
+  The Berendsen thermostat does not generate the correct kinetic energy
+  distribution, and should not be used for new production simulations (in
+  our opinion). We would recommend the V-rescale thermostat.
+
+
+WARNING 2 [file /path/to/run
+  The Berendsen barostat does not generate any strictly correct ensemble,
+  and should not be used for new production simulations (in our opinion).
+  We recommend using the C-rescale barostat instead.
+
+Number of degrees of freedom in T-Coupling group System is 910.00
+
+There was 1 NOTE
+
+There were 2 WARNINGs
+
+-------------------------------------------------------
+Program:     gmx grompp, version 2024.2-Homebrew
+Source file: src/gromacs/gmxpreprocess/grompp.cpp (line 2751)
+
+Fatal error:
+Too many warnings (2).
+If you are sure all warnings are harmless, use the -maxwarn option.
+
+For more information and tips for troubleshooting, please check the GROMACS
+website at https://manual.gromacs.org/current/user-guide/run-time-errors.html
+-------------------------------------------------------
+Setting the LD random seed to -406913034
+
+Generated 844 of the 356590 non-bonded parameter combinations
+
+Excluding 1 bonded neighbours molecule type 'row42'
+
+Excluding 1 bonded neighbours molecule type 'W'
+
+Setting gen_seed to -294691889
+
+Velocities were taken from a Maxwell distribution at 298.15 K
+
+Cleaning up constraints and constant bonded interactions with virtual sites
+Analysing residue names:
+There are:   301      Other residues
+Analysing residues not classified as Protein/DNA/RNA/Water and splitting into groups...
+
+This run will generate roughly 0 Mb of data

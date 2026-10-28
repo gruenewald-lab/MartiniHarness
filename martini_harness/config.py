@@ -13,7 +13,7 @@ Paths in an imported file are resolved against that file's directory.
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -86,6 +86,59 @@ class StageConfig(_Model):
         return name
 
 
+class AnalysisConfig(_Model):
+    """A program run in the directory of every simulation whose ``stage`` finished.
+
+    ``command``, ``output`` and ``stdin`` may reference matrix variables plus
+    ``{stage}``, ``{workdir}``, ``{tmpdir}`` (a scratch directory inside the
+    simulation directory, where the command runs; removed afterwards) and
+    ``{end_time}`` (simulated time of the stage in ps, formatted like GROMACS
+    file names, e.g. ``10000``).
+    """
+
+    name: str
+    stage: str | None = Field(default=None, description="Stage analysed (default: the last stage).")
+    command: str | list[str] = Field(
+        description="Program and arguments; a string is split like a shell command line."
+    )
+    output: str = Field(
+        description="File (relative to the simulation directory) whose data lines give the result."
+    )
+    result: Literal["last", "first-last", "last-first"] = Field(
+        default="last",
+        description=(
+            "'last': all columns of the last data line. 'first-last' / 'last-first': the signed "
+            "difference of one column between the first and the last data line."
+        ),
+    )
+    column: int = Field(
+        default=1, ge=0, description="Column (0 = x) the difference is taken of; first-last/last-first only."
+    )
+    stdin: str | None = Field(
+        default=None, description="Text sent to the program's standard input, e.g. a group selection."
+    )
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of the result columns (default: the xvg legends). A difference has one "
+            "column, named like the analysis by default."
+        ),
+    )
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, name: str) -> str:
+        if not SAFE_NAME.match(name):
+            raise ValueError(f"analysis name {name!r} may only contain letters, digits and ._+-")
+        return name
+
+    @model_validator(mode="after")
+    def _check_columns(self) -> "AnalysisConfig":
+        if self.result != "last" and len(self.columns) > 1:
+            raise ValueError(f"analysis {self.name!r}: a {self.result} difference has a single column name")
+        return self
+
+
 class SimulationDefaults(_Model):
     """Per-simulation parameters; every field can be overridden by the matrix."""
 
@@ -150,6 +203,14 @@ class CampaignConfig(_Model):
         default=None,
         description="Library from `martini_harness split-itp`, searched after `molecules`.",
     )
+    solvents: dict[str, dict[str, float]] = Field(
+        default_factory=dict,
+        description=(
+            "Solvent mixture name -> {molecule: relative amount}, e.g. wet octanol "
+            "{OCO: 920, W: 80}. A mixture can be used as a matrix `solvent`; "
+            "`n_solvent` is then the total number of solvent molecules."
+        ),
+    )
     matrix: MatrixConfig
     simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)
     stages: list[StageConfig] = Field(default_factory=default_stages)
@@ -163,6 +224,9 @@ class CampaignConfig(_Model):
             "mdrun flags for every stage except energy minimizations, e.g. "
             "{bonded: gpu, ntomp: 8, ntmpi: 1}. A stage's own mdrun flags take precedence."
         ),
+    )
+    analyses: list[AnalysisConfig] = Field(
+        default_factory=list, description="Analyses run by `martini_harness analyze`."
     )
 
     @model_validator(mode="after")
@@ -179,6 +243,18 @@ class CampaignConfig(_Model):
         self.molecules = {
             name: _resolve(path, base_dir) for name, path in self.molecules.items()
         }
+        return self
+
+    @model_validator(mode="after")
+    def _check_solvents(self) -> "CampaignConfig":
+        for name, components in self.solvents.items():
+            if not SAFE_NAME.match(name):
+                raise ValueError(f"solvent name {name!r} may only contain letters, digits and ._+-")
+            if not components:
+                raise ValueError(f"solvent {name!r} needs at least one molecule")
+            for molecule, amount in components.items():
+                if amount <= 0:
+                    raise ValueError(f"solvent {name!r}: amount of {molecule!r} must be positive")
         return self
 
     @model_validator(mode="after")
@@ -219,6 +295,23 @@ class CampaignConfig(_Model):
                     f"{COORDINATES_STEP!r} or an earlier stage"
                 )
             seen.append(stage.name)
+        return self
+
+    @model_validator(mode="after")
+    def _check_analyses(self) -> "CampaignConfig":
+        stage_names = [stage.name for stage in self.stages]
+        names = set()
+        for analysis in self.analyses:
+            if analysis.name in names:
+                raise ValueError(f"duplicate analysis name {analysis.name!r}")
+            names.add(analysis.name)
+            if analysis.stage is None:
+                analysis.stage = stage_names[-1]
+            elif analysis.stage not in stage_names:
+                raise ValueError(
+                    f"analysis {analysis.name!r}: no stage named {analysis.stage!r} "
+                    f"(stages: {', '.join(stage_names)})"
+                )
         return self
 
     def mdp_path(self, stage: StageConfig) -> Path:
