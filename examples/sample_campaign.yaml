@@ -22,6 +22,12 @@ topology:
 molecules:
   row42: row42.itp
 
+# Solvent mixtures, usable as a matrix `solvent`. Amounts are relative; the
+# n_solvent molecules are divided over the components. Wet octanol: 920 OCO
+# per 80 W, i.e. ~26 mol% water when one W stands for four water molecules.
+solvents:
+  wetOCO: {OCO: 920, W: 80}
+
 # Defaults for every simulation; any of these can be set per matrix entry.
 simulation:
   name: "{target}_in_{solvent}"
@@ -33,11 +39,11 @@ simulation:
 # `exclude`, extended by `include`. Every key becomes a template variable.
 matrix:
   target: [row42]
-  solvent: [W, OCO, CLF]
+  solvent: [W, wetOCO, CLF]
   include:
     - solvent: W
       density: 997.0
-    - solvent: OCO
+    - solvent: wetOCO
       density: 827.0
     - solvent: CLF
       n_solvent: 6000

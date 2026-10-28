@@ -51,6 +51,9 @@ topology:
 molecules:                             # targets not in the includes
   row42: row42.itp
 
+solvents:                              # mixtures: {molecule: relative amount}
+  wetOCO: {OCO: 920, W: 80}            # wet octanol
+
 simulation:                            # defaults, overridable per combination
   name: "{target}_in_{solvent}"
   n_target: 1
@@ -59,7 +62,7 @@ simulation:                            # defaults, overridable per combination
 
 matrix:
   target: [row42]
-  solvent: [W, OCO, CLF]
+  solvent: [W, wetOCO, CLF]
   include:
     - {solvent: W, density: 997.0}
     - {solvent: CLF, n_solvent: 6000, density: 1480.0}
@@ -98,9 +101,11 @@ reused across campaigns:
 imports:
   - shared/molecules.yaml            # relative to this file
   - shared/solvation_pipeline.yaml
+solvents:
+  wetOCO: {OCO: 920, W: 80}
 matrix:
   target: [row42]
-  solvent: [W, OCO]
+  solvent: [W, wetOCO]
 stage_overrides:                     # tweak one stage of the imported pipeline
   awh:
     mdp_params: {nsteps: 500000}
@@ -153,6 +158,24 @@ Every combination needs `target` and `solvent`. Keys named like a
 field; all keys are available as template variables, e.g. `"{temperature}"`.
 Target and solvent must be defined in the topology includes or in
 `molecules`; this is checked before anything runs.
+
+### Solvent mixtures
+
+`solvents` defines named mixtures that can be used as a matrix `solvent`.
+Each maps molecules to relative amounts; the `n_solvent` molecules are
+divided over them (rounded so they add up to `n_solvent`). The Martini
+octanol/water partition coefficient is computed with wet octanol, not pure
+`OCO`:
+
+```yaml
+solvents:
+  wetOCO: {OCO: 920, W: 80}   # ~26 mol% water, counting one W as four waters
+matrix:
+  solvent: [W, wetOCO]
+```
+
+With `n_solvent: 8000`, `row42_in_wetOCO` holds 7360 `OCO` and 640 `W`.
+Every component must be defined like any other solvent.
 
 ### Stages
 
@@ -238,8 +261,10 @@ imports:
   - targets.yaml
   - ../../examples/shared/solvation_pipeline.yaml
 output_dir: out
+solvents:
+  wetOCO: {OCO: 920, W: 80}
 matrix:
-  solvent: [W, OCO]
+  solvent: [W, wetOCO]
 ```
 
 Targets and solvents are looked up in `molecules` first, then in the

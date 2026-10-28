@@ -203,6 +203,14 @@ class CampaignConfig(_Model):
         default=None,
         description="Library from `martini_harness split-itp`, searched after `molecules`.",
     )
+    solvents: dict[str, dict[str, float]] = Field(
+        default_factory=dict,
+        description=(
+            "Solvent mixture name -> {molecule: relative amount}, e.g. wet octanol "
+            "{OCO: 920, W: 80}. A mixture can be used as a matrix `solvent`; "
+            "`n_solvent` is then the total number of solvent molecules."
+        ),
+    )
     matrix: MatrixConfig
     simulation: SimulationDefaults = Field(default_factory=SimulationDefaults)
     stages: list[StageConfig] = Field(default_factory=default_stages)
@@ -235,6 +243,18 @@ class CampaignConfig(_Model):
         self.molecules = {
             name: _resolve(path, base_dir) for name, path in self.molecules.items()
         }
+        return self
+
+    @model_validator(mode="after")
+    def _check_solvents(self) -> "CampaignConfig":
+        for name, components in self.solvents.items():
+            if not SAFE_NAME.match(name):
+                raise ValueError(f"solvent name {name!r} may only contain letters, digits and ._+-")
+            if not components:
+                raise ValueError(f"solvent {name!r} needs at least one molecule")
+            for molecule, amount in components.items():
+                if amount <= 0:
+                    raise ValueError(f"solvent {name!r}: amount of {molecule!r} must be positive")
         return self
 
     @model_validator(mode="after")

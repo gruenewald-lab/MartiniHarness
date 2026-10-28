@@ -58,6 +58,8 @@ class SimulationSpec:
     n_target: int
     n_solvent: int
     density: float
+    # (molecule, count) pairs: the solvent itself, or the components of a mixture
+    solvent_molecules: list[tuple[str, int]]
     includes: list[Path]
     workdir: Path
     variables: dict[str, Any] = field(default_factory=dict)
@@ -210,7 +212,7 @@ def plan_steps(spec: SimulationSpec, config: CampaignConfig) -> list[Step]:
     top_text = render_topology(
         spec.includes,
         spec.name,
-        [(spec.target, spec.n_target), (spec.solvent, spec.n_solvent)],
+        [(spec.target, spec.n_target), *spec.solvent_molecules],
     )
 
     def write_topology(backend: Backend) -> None:
@@ -388,10 +390,21 @@ def build_simulations(
         seen_names.add(name)
         variables["name"] = name
 
+        solvent = str(combo["solvent"])
+        if solvent in config.solvents:
+            try:
+                solvent_molecules = split_count(config.solvents[solvent], params.n_solvent)
+            except ValueError as exc:
+                errors.append(f"{name}: solvent {solvent!r}: {exc}")
+                continue
+        else:
+            solvent_molecules = [(solvent, params.n_solvent)]
+
         includes = list(config.topology.includes)
         target_itp = None
-        for role in ("target", "solvent"):
-            molname = str(combo[role])
+        roles = [("target", str(combo["target"]))]
+        roles += [("solvent", molname) for molname, _ in solvent_molecules]
+        for role, molname in roles:
             if molname in molecule_itps:
                 itp = molecule_itps[molname]
             elif molname in defined_in:
@@ -417,10 +430,11 @@ def build_simulations(
         spec = SimulationSpec(
             name=name,
             target=str(combo["target"]),
-            solvent=str(combo["solvent"]),
+            solvent=solvent,
             n_target=params.n_target,
             n_solvent=params.n_solvent,
             density=params.density,
+            solvent_molecules=solvent_molecules,
             includes=includes,
             workdir=output_dir / name,
             variables=variables,
@@ -434,6 +448,26 @@ def build_simulations(
     if errors:
         raise ConfigError("\n".join(errors))
     return simulations
+
+
+def split_count(amounts: dict[str, float], total: int) -> list[tuple[str, int]]:
+    """Divide ``total`` molecules over a mixture in proportion to ``amounts``.
+
+    Rounds by largest remainder, so the counts always add up to ``total``.
+
+    Raises:
+        ValueError: If a component would get no molecules.
+    """
+    scale = total / sum(amounts.values())
+    exact = {molname: amount * scale for molname, amount in amounts.items()}
+    counts = {molname: int(value) for molname, value in exact.items()}
+    by_remainder = sorted(exact, key=lambda molname: exact[molname] - counts[molname], reverse=True)
+    for molname in by_remainder[: total - sum(counts.values())]:
+        counts[molname] += 1
+    empty = [molname for molname, count in counts.items() if count == 0]
+    if empty:
+        raise ValueError(f"n_solvent {total} leaves no {', '.join(empty)} molecules")
+    return list(counts.items())
 
 
 def select_simulations(simulations: list[Simulation], names: list[str]) -> list[Simulation]:

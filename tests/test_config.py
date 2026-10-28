@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from martini_harness.config import DEFAULT_FORCEFIELD_DIR, ConfigError, load_campaign
-from martini_harness.simulation import build_simulations
+from martini_harness.simulation import build_simulations, run_campaign, split_count
 
 from .conftest import BASIC_CAMPAIGN, EXAMPLES
 
@@ -13,9 +13,10 @@ from .conftest import BASIC_CAMPAIGN, EXAMPLES
 def test_sample_campaign_loads():
     config = load_campaign(EXAMPLES / "sample_campaign.yaml")
     simulations = build_simulations(config)
-    assert [sim.name for sim in simulations] == ["row42_in_W", "row42_in_OCO", "row42_in_CLF"]
+    assert [sim.name for sim in simulations] == ["row42_in_W", "row42_in_wetOCO", "row42_in_CLF"]
     clf = simulations[2].spec
     assert (clf.n_solvent, clf.density) == (6000, 1480.0)
+    assert simulations[1].spec.solvent_molecules == [("OCO", 7360), ("W", 640)]
 
 
 def test_paths_resolve_relative_to_campaign_file(campaign_file, tmp_path):
@@ -74,6 +75,56 @@ def test_build_simulations_reports_errors(campaign_file, replace, message):
     config = load_campaign(campaign_file(BASIC_CAMPAIGN.replace(*replace)))
     with pytest.raises(ConfigError, match=message):
         build_simulations(config)
+
+
+MIXTURE_CAMPAIGN = BASIC_CAMPAIGN.replace("solvent: [W, CLF]", "solvent: [wetOCO]") + """
+    solvents:
+      wetOCO: {OCO: 920, W: 80}
+"""
+
+
+def test_solvent_mixture_divides_n_solvent(campaign_file, tmp_path, fake_backend):
+    (sim,) = build_simulations(load_campaign(campaign_file(MIXTURE_CAMPAIGN)))
+    assert sim.name == "row42_in_wetOCO"
+    assert sim.spec.solvent_molecules == [("OCO", 92), ("W", 8)]
+    run_campaign([sim], fake_backend)
+    molecules = (tmp_path / "out" / sim.name / "system.top").read_text().split("[ molecules ]")[1]
+    assert molecules.split() == ["row42", "1", "OCO", "92", "W", "8"]
+
+
+@pytest.mark.parametrize(
+    "amounts, n_solvent, expected",
+    [
+        ({"A": 1, "B": 1, "C": 1}, 100, [("A", 34), ("B", 33), ("C", 33)]),
+        ({"A": 0.92, "B": 0.08}, 8000, [("A", 7360), ("B", 640)]),
+        ({"A": 2, "B": 1}, 7, [("A", 5), ("B", 2)]),
+    ],
+)
+def test_split_count_adds_up(amounts, n_solvent, expected):
+    assert split_count(amounts, n_solvent) == expected
+
+
+@pytest.mark.parametrize(
+    "replace, message",
+    [
+        (("W: 80", "NOPE: 80"), "solvent 'NOPE' is not defined"),
+        (("n_solvent: 100", "n_solvent: 5"), "n_solvent 5 leaves no W molecules"),
+    ],
+)
+def test_solvent_mixture_build_errors(campaign_file, replace, message):
+    config = load_campaign(campaign_file(MIXTURE_CAMPAIGN.replace(*replace)))
+    with pytest.raises(ConfigError, match=message):
+        build_simulations(config)
+
+
+@pytest.mark.parametrize(
+    "mixture, message",
+    [("{OCO: 920, W: 0}", "amount of 'W' must be positive"), ("{}", "at least one molecule")],
+)
+def test_solvent_mixture_validation(campaign_file, mixture, message):
+    body = MIXTURE_CAMPAIGN.replace("{OCO: 920, W: 80}", mixture)
+    with pytest.raises(ConfigError, match=message):
+        load_campaign(campaign_file(body))
 
 
 def test_missing_mdp_placeholder_is_reported_before_running(campaign_file):
